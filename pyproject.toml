@@ -1,0 +1,25 @@
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    # Lambda handlers intentionally catch broad exceptions on the delivery path.
+    "B904",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "agent_loop",
+    "budget",
+    "identity",
+    "memory",
+    "messages",
+    "notify",
+    "suppressed_actions",
+    "tools",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

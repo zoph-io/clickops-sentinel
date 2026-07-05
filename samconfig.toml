@@ -1,0 +1,21 @@
+# SAM CLI configuration. Values here are defaults; `make deploy-guided`
+# will prompt for parameters and overwrite this file with your answers.
+version = 0.1
+
+[default.global.parameters]
+stack_name = "clickops-notifier"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.validate.parameters]
+lint = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+
+[default.sync.parameters]
+watch = true

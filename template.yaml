@@ -1,0 +1,481 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  ClickOps Notifier. Detects manual AWS Console changes in real time via the
+  EventBridge default bus, investigates each detection with a Claude agent on
+  Amazon Bedrock, and notifies via Amazon Q Developer chat channels (Slack,
+  Microsoft Teams) and email.
+
+Parameters:
+  NotificationEmail:
+    Type: String
+    Default: ""
+    Description: Email address for notifications. Leave empty to disable email delivery.
+  SlackWorkspaceId:
+    Type: String
+    Default: ""
+    Description: Slack workspace ID for Amazon Q Developer notifications. Requires one-time workspace authorization in the Amazon Q Developer console.
+  SlackChannelId:
+    Type: String
+    Default: ""
+    Description: Slack channel ID for Amazon Q Developer notifications.
+  TeamsTeamId:
+    Type: String
+    Default: ""
+    Description: Microsoft Teams team ID for Amazon Q Developer notifications.
+  TeamsChannelId:
+    Type: String
+    Default: ""
+    Description: Microsoft Teams channel ID for Amazon Q Developer notifications.
+  TeamsTenantId:
+    Type: String
+    Default: ""
+    Description: Microsoft Teams tenant ID for Amazon Q Developer notifications.
+  EnableConsoleLoginAlerts:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Alert on root console sign-ins, sign-ins without MFA, and failed sign-ins.
+  EnableAIInvestigation:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Investigate each detection with a Claude agent on Amazon Bedrock before notifying.
+  ClaudeModelId:
+    Type: String
+    Default: anthropic.claude-sonnet-4-6
+    Description: Bedrock foundation model ID. The inference profile is composed as BedrockGeoPrefix.ClaudeModelId. Low-cost alternative is anthropic.claude-haiku-4-5-20251001-v1:0.
+  BedrockGeoPrefix:
+    Type: String
+    Default: us
+    AllowedValues: ["us", "eu", "au", "jp", "global"]
+    Description: Geographic prefix of the Bedrock cross-region inference profile.
+  InvestigationLookbackHours:
+    Type: Number
+    Default: 6
+    MinValue: 1
+    MaxValue: 72
+    Description: Time window in hours for session retrace and same-IP correlation.
+  DailyTokenBudget:
+    Type: Number
+    Default: 2000000
+    MinValue: 10000
+    Description: Hard daily cap on Bedrock tokens (input plus output) per UTC day. When exhausted, notifications fall back to the plain path.
+  MaxAgentTurns:
+    Type: Number
+    Default: 8
+    MinValue: 1
+    MaxValue: 30
+    Description: Maximum agent loop iterations per investigation.
+  MemoryRetentionDays:
+    Type: Number
+    Default: 180
+    MinValue: 7
+    MaxValue: 365
+    Description: Retention in days for AgentCore Memory raw events and DynamoDB investigation records.
+  ExtraSuppressedActions:
+    Type: String
+    Default: ""
+    Description: Comma-separated additions to the built-in suppression list, format service:ActionName (for example glue:StartJobRun,ce:CreateReport).
+  AccountFriendlyName:
+    Type: String
+    Default: ""
+    Description: Human-readable account name shown in notifications. When empty, the IAM account alias is resolved automatically.
+  LambdaMemorySize:
+    Type: Number
+    Default: 128
+    MinValue: 128
+    MaxValue: 3008
+    Description: Memory size in MB for the detector Lambda.
+  PermissionsBoundaryArn:
+    Type: String
+    Default: ""
+    Description: Optional IAM permissions boundary ARN applied to all roles created by this stack.
+
+Conditions:
+  HasEmail: !Not [!Equals [!Ref NotificationEmail, ""]]
+  HasSlack: !And
+    - !Not [!Equals [!Ref SlackWorkspaceId, ""]]
+    - !Not [!Equals [!Ref SlackChannelId, ""]]
+  HasTeams: !And
+    - !Not [!Equals [!Ref TeamsTeamId, ""]]
+    - !Not [!Equals [!Ref TeamsChannelId, ""]]
+    - !Not [!Equals [!Ref TeamsTenantId, ""]]
+  HasChat: !Or [!Condition HasSlack, !Condition HasTeams]
+  AIEnabled: !Equals [!Ref EnableAIInvestigation, "true"]
+  ConsoleLoginAlertsEnabled: !Equals [!Ref EnableConsoleLoginAlerts, "true"]
+  HasBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, ""]]
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+
+Resources:
+
+  # ---------------------------------------------------------------------
+  # State table: dedup records, session cooldowns, budget counters, and
+  # investigation records for statistics.
+  # ---------------------------------------------------------------------
+  StateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ---------------------------------------------------------------------
+  # Notification topics. The chat topic feeds Amazon Q Developer channel
+  # configurations; the email topic feeds the optional email subscription.
+  # ---------------------------------------------------------------------
+  ChatTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/aws/sns
+
+  EmailTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      KmsMasterKeyId: alias/aws/sns
+
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasEmail
+    Properties:
+      TopicArn: !Ref EmailTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # ---------------------------------------------------------------------
+  # Dead letter queue for failed async Lambda invocations.
+  # ---------------------------------------------------------------------
+  DeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+
+  # ---------------------------------------------------------------------
+  # AgentCore Memory: long-term investigation memory, namespaced per actor.
+  # ---------------------------------------------------------------------
+  AgentMemory:
+    Type: AWS::BedrockAgentCore::Memory
+    Condition: AIEnabled
+    Properties:
+      Name: ClickOpsNotifierMemory
+      Description: Long-term memory for ClickOps investigation verdicts and actor history.
+      EventExpiryDuration: !Ref MemoryRetentionDays
+      MemoryStrategies:
+        - SemanticMemoryStrategy:
+            Name: ActorFacts
+            Namespaces:
+              - "/actors/{actorId}/facts"
+        - SummaryMemoryStrategy:
+            Name: SessionSummaries
+            Namespaces:
+              - "/actors/{actorId}/sessions/{sessionId}"
+
+  # ---------------------------------------------------------------------
+  # Detector Lambda: filters EventBridge events, deduplicates, extracts
+  # identity, and hands off to the investigator or notifies directly.
+  # ---------------------------------------------------------------------
+  DetectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/detector
+      Handler: handler.lambda_handler
+      MemorySize: !Ref LambdaMemorySize
+      Timeout: 30
+      PermissionsBoundary: !If [HasBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref StateTable
+          CHAT_TOPIC_ARN: !Ref ChatTopic
+          EMAIL_TOPIC_ARN: !Ref EmailTopic
+          EMAIL_ENABLED: !If [HasEmail, "true", "false"]
+          CHAT_ENABLED: !If [HasChat, "true", "false"]
+          ENABLE_AI: !Ref EnableAIInvestigation
+          INVESTIGATOR_FUNCTION_NAME: !Ref InvestigatorFunction
+          EXTRA_SUPPRESSED_ACTIONS: !Ref ExtraSuppressedActions
+          ACCOUNT_FRIENDLY_NAME: !Ref AccountFriendlyName
+          SESSION_COOLDOWN_MINUTES: "30"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref StateTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt ChatTopic.TopicName
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt EmailTopic.TopicName
+        - LambdaInvokePolicy:
+            FunctionName: !Ref InvestigatorFunction
+        - Statement:
+            - Effect: Allow
+              Action: iam:ListAccountAliases
+              Resource: "*"
+
+  ConsoleActionRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Mutating CloudTrail management events made with console session credentials.
+      State: ENABLED
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          sessionCredentialFromConsole:
+            - true
+            - "true"
+          readOnly:
+            - false
+            - "false"
+          userIdentity:
+            invokedBy:
+              - exists: false
+      Targets:
+        - Id: detector
+          Arn: !GetAtt DetectorFunction.Arn
+
+  ConsoleActionRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DetectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ConsoleActionRule.Arn
+
+  ConsoleLoginRule:
+    Type: AWS::Events::Rule
+    Condition: ConsoleLoginAlertsEnabled
+    Properties:
+      Description: AWS Console sign-in events for root, MFA, and failure alerting.
+      State: ENABLED
+      EventPattern:
+        detail-type:
+          - AWS Console Sign In via CloudTrail
+        detail:
+          eventName:
+            - ConsoleLogin
+      Targets:
+        - Id: detector
+          Arn: !GetAtt DetectorFunction.Arn
+
+  ConsoleLoginRulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: ConsoleLoginAlertsEnabled
+    Properties:
+      FunctionName: !Ref DetectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ConsoleLoginRule.Arn
+
+  # ---------------------------------------------------------------------
+  # Investigator Lambda: Claude agent on Bedrock. Retraces the console
+  # session, checks adjacent changes, assesses purpose, security, and
+  # FinOps impact, and publishes the enriched notification.
+  # ---------------------------------------------------------------------
+  InvestigatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/investigator
+      Handler: handler.lambda_handler
+      MemorySize: 1024
+      Timeout: 900
+      PermissionsBoundary: !If [HasBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt DeadLetterQueue.Arn
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref StateTable
+          CHAT_TOPIC_ARN: !Ref ChatTopic
+          EMAIL_TOPIC_ARN: !Ref EmailTopic
+          EMAIL_ENABLED: !If [HasEmail, "true", "false"]
+          CHAT_ENABLED: !If [HasChat, "true", "false"]
+          MODEL_ID: !Sub "${BedrockGeoPrefix}.${ClaudeModelId}"
+          MEMORY_ID: !If [AIEnabled, !GetAtt AgentMemory.MemoryId, ""]
+          LOOKBACK_HOURS: !Ref InvestigationLookbackHours
+          DAILY_TOKEN_BUDGET: !Ref DailyTokenBudget
+          MAX_AGENT_TURNS: !Ref MaxAgentTurns
+          MAX_INVESTIGATION_TOKENS: "60000"
+          MEMORY_RETENTION_DAYS: !Ref MemoryRetentionDays
+          METRICS_NAMESPACE: ClickOpsNotifier
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref StateTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt ChatTopic.TopicName
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt EmailTopic.TopicName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource:
+                - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockGeoPrefix}.${ClaudeModelId}"
+                - !Sub "arn:${AWS::Partition}:bedrock:*::foundation-model/${ClaudeModelId}"
+            - Effect: Allow
+              Action:
+                - cloudtrail:LookupEvents
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  cloudwatch:namespace: ClickOpsNotifier
+            - Effect: Allow
+              Action:
+                - bedrock-agentcore:CreateEvent
+                - bedrock-agentcore:ListEvents
+                - bedrock-agentcore:GetEvent
+                - bedrock-agentcore:RetrieveMemoryRecords
+                - bedrock-agentcore:ListMemoryRecords
+                - bedrock-agentcore:GetMemoryRecord
+              Resource:
+                - !If
+                  - AIEnabled
+                  - !GetAtt AgentMemory.MemoryArn
+                  - !Sub "arn:${AWS::Partition}:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:memory/disabled"
+
+  # ---------------------------------------------------------------------
+  # Amazon Q Developer chat channel configurations. The resource type
+  # retains its former AWS Chatbot name.
+  # ---------------------------------------------------------------------
+  ChatbotRole:
+    Type: AWS::IAM::Role
+    Condition: HasChat
+    Properties:
+      PermissionsBoundary: !If [HasBoundary, !Ref PermissionsBoundaryArn, !Ref AWS::NoValue]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: chatbot.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: notifications-only
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:Describe*
+                  - cloudwatch:Get*
+                  - cloudwatch:List*
+                Resource: "*"
+
+  SlackChannelConfiguration:
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Condition: HasSlack
+    Properties:
+      ConfigurationName: !Sub "${AWS::StackName}-slack"
+      IamRoleArn: !GetAtt ChatbotRole.Arn
+      SlackWorkspaceId: !Ref SlackWorkspaceId
+      SlackChannelId: !Ref SlackChannelId
+      SnsTopicArns:
+        - !Ref ChatTopic
+
+  TeamsChannelConfiguration:
+    Type: AWS::Chatbot::MicrosoftTeamsChannelConfiguration
+    Condition: HasTeams
+    Properties:
+      ConfigurationName: !Sub "${AWS::StackName}-teams"
+      IamRoleArn: !GetAtt ChatbotRole.Arn
+      TeamId: !Ref TeamsTeamId
+      TeamsChannelId: !Ref TeamsChannelId
+      TeamsTenantId: !Ref TeamsTenantId
+      SnsTopicArns:
+        - !Ref ChatTopic
+
+  # ---------------------------------------------------------------------
+  # Operational alarms. Alarm notifications go to the chat topic, which
+  # Amazon Q Developer renders natively.
+  # ---------------------------------------------------------------------
+  DetectorErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Detector Lambda errors. Alerts may be missing.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DetectorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref ChatTopic
+
+  InvestigatorErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Investigator Lambda errors. Notifications fall back to the plain path.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref InvestigatorFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref ChatTopic
+
+  TokenBudgetAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Condition: AIEnabled
+    Properties:
+      AlarmDescription: Bedrock daily token budget is 80 percent consumed.
+      Namespace: ClickOpsNotifier
+      MetricName: BudgetUsedPercent
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 80
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref ChatTopic
+
+Outputs:
+  ChatTopicArn:
+    Description: SNS topic feeding Amazon Q Developer chat channels.
+    Value: !Ref ChatTopic
+  EmailTopicArn:
+    Description: SNS topic feeding the email subscription.
+    Value: !Ref EmailTopic
+  StateTableName:
+    Description: DynamoDB table with dedup, budget, and investigation records.
+    Value: !Ref StateTable
+  DetectorFunctionName:
+    Value: !Ref DetectorFunction
+  InvestigatorFunctionName:
+    Value: !Ref InvestigatorFunction
+  AgentMemoryId:
+    Condition: AIEnabled
+    Description: AgentCore Memory resource ID.
+    Value: !GetAtt AgentMemory.MemoryId
