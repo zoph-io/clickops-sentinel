@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Print investigation statistics from the ClickOps Notifier state table.
+"""Print investigation statistics from the ClickOps Sentinel state table.
 
-Usage: python scripts/stats.py --stack-name clickops-notifier --region us-east-1 --days 30
+Usage: python scripts/stats.py --stack-name clickops-sentinel --region us-east-1 --days 30
 """
 
 import argparse
@@ -49,8 +49,8 @@ def print_counter(title: str, counter: Counter, limit: int = 10) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ClickOps Notifier statistics")
-    parser.add_argument("--stack-name", default="clickops-notifier")
+    parser = argparse.ArgumentParser(description="ClickOps Sentinel statistics")
+    parser.add_argument("--stack-name", default="clickops-sentinel")
     parser.add_argument("--region", default=None)
     parser.add_argument("--days", type=int, default=30)
     args = parser.parse_args()

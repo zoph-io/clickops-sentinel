@@ -34,7 +34,7 @@ def build_qdev_payload(
         "metadata": {
             "threadId": thread_id,
             "summary": summary,
-            "eventType": "clickops-notifier",
+            "eventType": "clickops-sentinel",
         },
     }
     if keywords:
@@ -142,13 +142,11 @@ def build_followup_note(record: dict, who: str) -> dict:
 def publish(
     sns_client,
     chat_topic_arn: str,
-    email_topic_arn: str,
     chat_enabled: bool,
-    email_enabled: bool,
     alert: dict,
     thread_id: str,
 ) -> None:
-    """Publish an alert to the enabled channels."""
+    """Publish the chat notification. Email goes through email_send instead."""
     if chat_enabled:
         sns_client.publish(
             TopicArn=chat_topic_arn,
@@ -159,10 +157,4 @@ def publish(
                 summary=alert["title"],
                 keywords=["clickops"],
             ),
-        )
-    if email_enabled:
-        sns_client.publish(
-            TopicArn=email_topic_arn,
-            Subject=alert["title"][:99],
-            Message=alert["text"],
         )

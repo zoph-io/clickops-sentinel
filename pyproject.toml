@@ -13,6 +13,9 @@ ignore = [
 known-first-party = [
     "agent_loop",
     "budget",
+    "email_render",
+    "email_secret",
+    "email_send",
     "identity",
     "memory",
     "messages",

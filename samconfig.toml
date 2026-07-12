@@ -3,7 +3,7 @@
 version = 0.1
 
 [default.global.parameters]
-stack_name = "clickops-notifier"
+stack_name = "clickops-sentinel"
 
 [default.build.parameters]
 cached = true

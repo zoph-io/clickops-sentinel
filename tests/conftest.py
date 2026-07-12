@@ -45,9 +45,12 @@ def base_env(monkeypatch):
     env = {
         "TABLE_NAME": "test-table",
         "CHAT_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:chat",
-        "EMAIL_TOPIC_ARN": "arn:aws:sns:us-east-1:123456789012:email",
         "CHAT_ENABLED": "true",
         "EMAIL_ENABLED": "true",
+        "EMAIL_PROVIDER": "resend",
+        "EMAIL_FROM": "alerts@example.com",
+        "EMAIL_TO": "owner@example.com",
+        "EMAIL_API_KEY_PARAM": "/clickops-sentinel/email-api-key",
         "ENABLE_AI": "true",
         "INVESTIGATOR_FUNCTION_NAME": "investigator",
         "EXTRA_SUPPRESSED_ACTIONS": "",
@@ -60,7 +63,7 @@ def base_env(monkeypatch):
         "MAX_AGENT_TURNS": "8",
         "MAX_INVESTIGATION_TOKENS": "60000",
         "MEMORY_RETENTION_DAYS": "180",
-        "METRICS_NAMESPACE": "ClickOpsNotifier",
+        "METRICS_NAMESPACE": "ClickOpsSentinel",
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)

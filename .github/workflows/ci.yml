@@ -12,8 +12,8 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - name: Install dev dependencies
@@ -22,15 +22,26 @@ jobs:
         run: ruff check src/ tests/ scripts/
       - name: Unit tests
         run: pytest tests/ -v
+      - name: Dependency audit
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements-dev.txt -r src/investigator/requirements.txt
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/dependency-review-action@v4
 
   validate-template:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - uses: aws-actions/setup-sam@v2
+      - uses: aws-actions/setup-sam@v3
         with:
           use-installer: true
       - name: Validate SAM template

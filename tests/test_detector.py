@@ -12,15 +12,17 @@ def client_error(code: str) -> ClientError:
 
 
 def wire(detector_handler, monkeypatch, dynamodb=None, sns=None, lam=None, iam=None):
-    """Install fake clients and reset module caches."""
+    """Install fake clients, a fake email sender, and reset module caches."""
     fakes = {
         "dynamodb": dynamodb or MagicMock(),
         "sns": sns or MagicMock(),
         "lambda": lam or MagicMock(),
         "iam": iam or MagicMock(),
+        "email": MagicMock(return_value=True),
     }
     monkeypatch.setattr(detector_handler, "_clients", fakes)
     monkeypatch.setattr(detector_handler, "_account_alias_cache", [])
+    monkeypatch.setattr(detector_handler.email_send, "send_email", fakes["email"])
     return fakes
 
 
@@ -90,7 +92,8 @@ def test_session_cooldown_produces_followup(detector_handler, base_env, monkeypa
     assert result["decision"] == "followup"
     fakes["lambda"].invoke.assert_not_called()
     # Chat and email both receive the follow-up note.
-    assert fakes["sns"].publish.call_count == 2
+    assert fakes["sns"].publish.call_count == 1
+    fakes["email"].assert_called_once()
 
 
 def test_ai_disabled_notifies_directly(detector_handler, base_env, monkeypatch):
@@ -99,7 +102,8 @@ def test_ai_disabled_notifies_directly(detector_handler, base_env, monkeypatch):
     event = sample_events.eventbridge_envelope(sample_events.CONSOLE_MUTATION)
     result = detector_handler.lambda_handler(event, None)
     assert result["decision"] == "notified"
-    assert fakes["sns"].publish.call_count == 2
+    assert fakes["sns"].publish.call_count == 1
+    fakes["email"].assert_called_once()
     fakes["lambda"].invoke.assert_not_called()
 
 
@@ -110,7 +114,8 @@ def test_investigator_failure_falls_back_to_plain(detector_handler, base_env, mo
     event = sample_events.eventbridge_envelope(sample_events.CONSOLE_MUTATION)
     result = detector_handler.lambda_handler(event, None)
     assert result["decision"] == "notified"
-    assert fakes["sns"].publish.call_count == 2
+    assert fakes["sns"].publish.call_count == 1
+    fakes["email"].assert_called_once()
 
 
 def test_root_login_alerts(detector_handler, base_env, monkeypatch):
@@ -120,7 +125,8 @@ def test_root_login_alerts(detector_handler, base_env, monkeypatch):
     )
     result = detector_handler.lambda_handler(event, None)
     assert result["decision"] == "login-alert"
-    assert fakes["sns"].publish.call_count == 2
+    assert fakes["sns"].publish.call_count == 1
+    fakes["email"].assert_called_once()
 
 
 def test_login_without_mfa_alerts(detector_handler, base_env, monkeypatch):
@@ -130,7 +136,8 @@ def test_login_without_mfa_alerts(detector_handler, base_env, monkeypatch):
     )
     result = detector_handler.lambda_handler(event, None)
     assert result["decision"] == "login-alert"
-    assert fakes["sns"].publish.call_count == 2
+    assert fakes["sns"].publish.call_count == 1
+    fakes["email"].assert_called_once()
 
 
 def test_normal_login_is_quiet(detector_handler, base_env, monkeypatch):
@@ -141,6 +148,7 @@ def test_normal_login_is_quiet(detector_handler, base_env, monkeypatch):
     result = detector_handler.lambda_handler(event, None)
     assert result["decision"] == "login-ok"
     fakes["sns"].publish.assert_not_called()
+    fakes["email"].assert_not_called()
 
 
 def test_account_alias_resolution(detector_handler, base_env, monkeypatch):

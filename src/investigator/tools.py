@@ -107,6 +107,19 @@ def lookup_events_by_user(cloudtrail_client, username: str, hours: int) -> str:
     return _truncate(json.dumps(result, default=str), MAX_TOOL_OUTPUT_CHARS)
 
 
+def session_timeline(cloudtrail_client, access_key_id: str, hours: int) -> list:
+    """Time-ordered event summaries for one console session, for the email
+    session path diagram. One temporary access key equals one session."""
+    access_key_id = (access_key_id or "").strip()
+    if not access_key_id.startswith(("ASIA", "AKIA")):
+        return []
+    attribute = {"AttributeKey": "AccessKeyId", "AttributeValue": access_key_id}
+    events = _lookup(cloudtrail_client, [attribute], hours)
+    steps = [summarize_cloudtrail_event(raw) for raw in events]
+    steps.sort(key=lambda item: item.get("time") or "")
+    return steps
+
+
 def lookup_events_by_ip(cloudtrail_client, ip: str, hours: int) -> str:
     """Mutating activity from one source IP. CloudTrail LookupEvents cannot
     filter by IP server-side, so this scans recent write events and filters

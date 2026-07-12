@@ -1,4 +1,4 @@
-# Contributing to ClickOps Notifier
+# Contributing to ClickOps Sentinel
 
 Thank you for considering a contribution. This project welcomes bug reports,
 feature requests, documentation improvements, and pull requests.

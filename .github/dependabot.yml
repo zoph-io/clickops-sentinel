@@ -4,11 +4,20 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      python-deps:
+        update-types: ["minor", "patch"]
   - package-ecosystem: pip
     directory: /src/investigator
     schedule:
       interval: weekly
+    groups:
+      python-deps:
+        update-types: ["minor", "patch"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      github-actions:
+        update-types: ["minor", "patch"]

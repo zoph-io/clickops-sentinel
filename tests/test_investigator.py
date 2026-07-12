@@ -28,8 +28,10 @@ def wire(investigator_handler, monkeypatch, sns=None, dynamodb=None):
         "cloudtrail": MagicMock(),
         "bedrock-runtime": MagicMock(),
         "bedrock-agentcore": MagicMock(),
+        "email": MagicMock(return_value=True),
     }
     monkeypatch.setattr(investigator_handler, "_clients", fakes)
+    monkeypatch.setattr(investigator_handler.email_send, "send_email", fakes["email"])
     return fakes
 
 
@@ -108,6 +110,12 @@ def test_verdict_produces_enriched_notification(
     assert body.startswith("*Purpose*")
     assert "HIGH" in body
     assert "Recommendation" in body
+    # Rich email sent with the session path.
+    fakes["email"].assert_called_once()
+    subject, html, text = fakes["email"].call_args.args
+    assert subject == "ClickOps detected: RunInstances"
+    assert "CONSOLE SESSION PATH" in html
+    assert "RunInstances" in html
 
 
 def test_run_investigation_consumes_budget_and_records(

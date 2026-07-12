@@ -18,6 +18,8 @@ import boto3
 
 import agent_loop
 import budget
+import email_render
+import email_send
 import memory
 import messages
 import tools
@@ -28,7 +30,7 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 _clients: dict = {}
 
 SYSTEM_PROMPT = """\
-You are an AWS security and cloud cost analyst embedded in ClickOps Notifier,
+You are an AWS security and cloud cost analyst embedded in ClickOps Sentinel,
 a tool that alerts an account owner when someone changes infrastructure
 manually through the AWS Console instead of infrastructure as code.
 
@@ -152,18 +154,35 @@ def _publish(alert: dict, thread_id: str) -> None:
     messages.publish(
         sns_client=_client("sns"),
         chat_topic_arn=os.environ["CHAT_TOPIC_ARN"],
-        email_topic_arn=os.environ["EMAIL_TOPIC_ARN"],
         chat_enabled=os.environ.get("CHAT_ENABLED") == "true",
-        email_enabled=os.environ.get("EMAIL_ENABLED") == "true",
         alert=alert,
         thread_id=thread_id,
     )
 
 
+def _send_email(email: dict, text: str) -> None:
+    """Best-effort rich email; failures are logged and never block delivery."""
+    email_send.send_email(email["subject"], email["html"], text)
+
+
+def _session_steps(record: dict, session_id: str) -> list:
+    """Timeline of the triggering console session for the email diagram."""
+    try:
+        lookback = int(os.environ.get("LOOKBACK_HOURS", "6"))
+        steps = tools.session_timeline(_client("cloudtrail"), session_id, lookback)
+    except Exception as error:  # noqa: BLE001 diagram is best-effort
+        logger.warning("session timeline lookup failed: %s", error)
+        steps = []
+    if not steps:
+        # Always show at least the triggering event.
+        steps = [tools.summarize_cloudtrail_event(record)]
+    return email_render.mark_highlighted_step(steps, record)
+
+
 def _publish_metrics(usage: dict, budget_used_percent: float) -> None:
     try:
         _client("cloudwatch").put_metric_data(
-            Namespace=os.environ.get("METRICS_NAMESPACE", "ClickOpsNotifier"),
+            Namespace=os.environ.get("METRICS_NAMESPACE", "ClickOpsSentinel"),
             MetricData=[
                 {"MetricName": "InputTokens", "Value": usage["inputTokens"], "Unit": "Count"},
                 {"MetricName": "OutputTokens", "Value": usage["outputTokens"], "Unit": "Count"},
@@ -314,22 +333,33 @@ def lambda_handler(event: dict, context) -> dict:
         note = "AI investigation skipped: daily token budget exhausted."
         alert = messages.build_plain_alert(record, identity["display"], account_label, note)
         _publish(alert, session_id)
+        _send_email(
+            email_render.plain_email(record, identity["display"], account_label, note),
+            alert["text"],
+        )
         try:
             if budget.try_claim_exhaustion_notice(_client("dynamodb"), os.environ["TABLE_NAME"]):
+                notice_text = (
+                    "ClickOps Sentinel: the daily Bedrock token budget is "
+                    "spent. Alerts continue on the plain path until the "
+                    "next UTC day."
+                )
                 _publish(
                     {
-                        "title": "ClickOps Notifier: AI budget exhausted for today",
+                        "title": "ClickOps Sentinel: AI budget exhausted for today",
                         "markdown": (
                             "The daily Bedrock token budget is spent. Alerts "
                             "continue on the plain path until the next UTC day."
                         ),
-                        "text": (
-                            "ClickOps Notifier: the daily Bedrock token budget is "
-                            "spent. Alerts continue on the plain path until the "
-                            "next UTC day."
-                        ),
+                        "text": notice_text,
                     },
                     "budget-notice",
+                )
+                _send_email(
+                    email_render.note_email(
+                        "ClickOps Sentinel: AI budget exhausted for today", notice_text
+                    ),
+                    notice_text,
                 )
         except Exception as error:  # noqa: BLE001 notice is best-effort
             logger.warning("budget notice failed: %s", error)
@@ -343,16 +373,28 @@ def lambda_handler(event: dict, context) -> dict:
         verdict = None
 
     if verdict is None:
+        note = "AI investigation unavailable, plain alert."
         alert = messages.build_plain_alert(
-            record, identity["display"], account_label,
-            "AI investigation unavailable, plain alert.",
+            record, identity["display"], account_label, note
         )
         _publish(alert, session_id)
+        _send_email(
+            email_render.plain_email(record, identity["display"], account_label, note),
+            alert["text"],
+        )
         log_decision(event_id, "notified-plain")
         return {"decision": "notified-plain"}
 
     alert = messages.build_enriched_alert(record, identity["display"], account_label, verdict)
     _publish(alert, session_id)
+    if email_send.email_enabled():
+        steps = _session_steps(record, session_id)
+        _send_email(
+            email_render.enriched_email(
+                record, identity["display"], account_label, verdict, steps
+            ),
+            alert["text"],
+        )
     log_decision(
         event_id,
         "notified-enriched",

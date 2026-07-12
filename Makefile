@@ -1,18 +1,18 @@
-# ClickOps Notifier build and deployment tasks.
+# ClickOps Sentinel build and deployment tasks.
 #
 # Prerequisites: AWS SAM CLI, Python 3.13, GNU make.
 # Usage: make help
 
-STACK_NAME ?= clickops-notifier
+STACK_NAME ?= clickops-sentinel
 REGION ?= $(shell aws configure get region 2>/dev/null || echo us-east-1)
 PYTHON ?= python3
 VENV := .venv
 DAYS ?= 30
 
-.PHONY: help install build test lint validate deploy deploy-guided delete stats clean
+.PHONY: help install build test lint validate deploy deploy-guided delete stats preview-email clean
 
 help:
-	@echo "ClickOps Notifier"
+	@echo "ClickOps Sentinel"
 	@echo ""
 	@echo "  make install         Create a virtualenv and install dev dependencies"
 	@echo "  make build           Build the SAM application"
@@ -22,6 +22,7 @@ help:
 	@echo "  make deploy-guided   First deployment, prompts for all parameters"
 	@echo "  make deploy          Deploy using saved samconfig.toml values"
 	@echo "  make stats           Print investigation statistics (DAYS=30)"
+	@echo "  make preview-email   Render the email templates to docs/email-preview.html"
 	@echo "  make delete          Delete the stack"
 	@echo ""
 	@echo "  Variables: STACK_NAME=$(STACK_NAME) REGION=$(REGION)"
@@ -53,6 +54,9 @@ deploy: build
 
 stats:
 	$(VENV)/bin/python scripts/stats.py --stack-name $(STACK_NAME) --region $(REGION) --days $(DAYS)
+
+preview-email:
+	$(PYTHON) scripts/render_email.py
 
 delete:
 	sam delete --stack-name $(STACK_NAME) --region $(REGION)

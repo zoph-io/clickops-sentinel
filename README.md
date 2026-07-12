@@ -1,13 +1,18 @@
-# ClickOps Notifier
+# ClickOps Sentinel
+
+[![CI](https://github.com/zoph-io/clickops-notifier/actions/workflows/ci.yml/badge.svg)](https://github.com/zoph-io/clickops-notifier/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/)
 
 Get notified, with AI-powered context, when someone changes your AWS account
 through the AWS Console instead of infrastructure as code.
 
-ClickOps Notifier detects mutating actions made with console session
+ClickOps Sentinel detects mutating actions made with console session
 credentials in near real time, investigates each one with a Claude agent on
 Amazon Bedrock (what was the user trying to do, what does it mean for
 security and cost, what happened in the rest of the session), and delivers a
-reasoned alert to Slack, Microsoft Teams, or email.
+reasoned alert to Slack, Microsoft Teams, or a rich HTML email with a visual
+step-by-step view of the console session.
 
 ## How it works
 
@@ -21,11 +26,10 @@ flowchart LR
     INV <-->|session retrace, adjacent changes| CTH[CloudTrail Event History]
     INV <-->|actor history and verdicts| MEM[AgentCore Memory]
     INV --> SNSQ[SNS chat topic]
-    INV --> SNSE[SNS email topic]
     SNSQ --> QDev[Amazon Q Developer chat app]
     QDev --> Slack[Slack channel]
     QDev --> Teams[MS Teams channel]
-    SNSE --> Email[Email subscription]
+    INV -->|HTML via external provider| Email[Rich email alert]
     EB2[ConsoleLogin rule] --> DET
 ```
 
@@ -55,6 +59,49 @@ the same IP, consults its long-term memory about the actor, and produces:
 Delivery is guaranteed: if Bedrock is unavailable or the daily token budget
 is spent, the alert still goes out on a plain, non-AI path.
 
+## Rich email alerts
+
+Email alerts are full HTML: verdict and confidence pills, security and cost
+cards, the agent's purpose and recommendation, and a console session path
+diagram showing every step the user took, with the alerted action
+highlighted.
+
+![Rich email alert with console session path](docs/email-mock.png)
+
+Emails are sent through an external transactional email provider, not
+Amazon SES (SES production access is deliberately out of scope). Supported
+providers: [Resend](https://resend.com) (default),
+[Postmark](https://postmarkapp.com), [Mailgun](https://www.mailgun.com),
+[SendGrid](https://sendgrid.com), or any SMTP server for a fully
+self-hosted path. The transport uses the Python standard library only.
+
+One-time provider setup (Resend example):
+
+1. Create a Resend account, verify your sending domain, and create an API
+   key.
+2. Store the key as an SSM SecureString in the deployment region:
+
+```bash
+aws ssm put-parameter \
+  --name /clickops-sentinel/email-api-key \
+  --type SecureString \
+  --value "re_your_api_key"
+```
+
+3. Deploy with `NotificationEmail` (recipient) and `EmailFrom` (verified
+   sender). The key is fetched with decryption at runtime and never appears
+   in CloudFormation outputs or Lambda environment variables.
+
+For SMTP, set `EmailProvider=smtp` plus `EmailSmtpHost`, `EmailSmtpPort`,
+and `EmailSmtpUsername`, and store the SMTP password in the SSM parameter.
+For Mailgun, also set `EmailMailgunDomain`.
+
+Preview the templates locally without any AWS access:
+
+```bash
+make preview-email   # writes docs/email-preview.html
+```
+
 ## Prerequisites
 
 - An AWS account with the AWS SAM CLI, Python 3.13, and GNU make installed
@@ -66,29 +113,30 @@ is spent, the alert still goes out on a plain, non-AI path.
   `ClaudeModelId`.
 - Amazon Bedrock AgentCore Memory availability in your region (used for
   long-term investigation memory; the stack deploys it via CloudFormation).
+- For email delivery: an account at a supported email provider and the API
+  key stored in SSM (see above).
 - For Slack or Microsoft Teams delivery: a one-time workspace authorization
   in the Amazon Q Developer console (see below). Not needed for email.
 
 ## Quickstart (email)
 
-The fastest path needs nothing but an email address:
-
 ```bash
-git clone <this-repository>
+git clone https://github.com/zoph-io/clickops-notifier.git
 cd clickops-notifier
+aws ssm put-parameter --name /clickops-sentinel/email-api-key \
+  --type SecureString --value "re_your_api_key"
 make install
 make build
 make deploy-guided
 ```
 
-When prompted, set `NotificationEmail` to your address and accept the
-defaults elsewhere. After deployment, confirm the SNS subscription email that
-arrives in your inbox.
+When prompted, set `NotificationEmail` to the recipient address and
+`EmailFrom` to your verified sender, and accept the defaults elsewhere.
 
 Smoke test: open the AWS Console and make a harmless change in the deployed
 region, for example add a tag to an SNS topic. Within a minute or two you
-should receive an email leading with the agent's purpose assessment and
-verdict.
+should receive a rich HTML email leading with the agent's verdict and the
+session path.
 
 ## Slack and Microsoft Teams setup
 
@@ -124,7 +172,12 @@ Changes made by one console session are grouped into the same message thread.
 
 | Parameter | Default | Description |
 | --- | --- | --- |
-| `NotificationEmail` | empty | Email address for alerts. Empty disables email. |
+| `NotificationEmail` | empty | Recipient address for email alerts. Empty disables email. |
+| `EmailFrom` | empty | Verified sender address at your provider. Required for email. |
+| `EmailProvider` | `resend` | `resend`, `postmark`, `mailgun`, `sendgrid`, or `smtp`. |
+| `EmailApiKeyParam` | `/clickops-sentinel/email-api-key` | SSM SecureString parameter holding the provider API key or SMTP password. |
+| `EmailSmtpHost` / `EmailSmtpPort` / `EmailSmtpUsername` | empty / `587` / empty | SMTP settings, only for `EmailProvider=smtp`. |
+| `EmailMailgunDomain` | empty | Mailgun sending domain, only for `EmailProvider=mailgun`. |
 | `SlackWorkspaceId` / `SlackChannelId` | empty | Slack channel via Amazon Q Developer. |
 | `TeamsTeamId` / `TeamsChannelId` / `TeamsTenantId` | empty | Microsoft Teams channel via Amazon Q Developer. |
 | `EnableConsoleLoginAlerts` | `true` | Alert on root sign-ins, sign-ins without MFA, failed sign-ins. |
@@ -156,13 +209,14 @@ activity cannot run up the bill:
 4. One investigation per console session per 30 minutes: follow-up changes
    in the same session are appended to the same chat thread as one-line
    notes.
-5. Token usage is published as CloudWatch metrics (`ClickOpsNotifier`
+5. Token usage is published as CloudWatch metrics (`ClickOpsSentinel`
    namespace), with an alarm at 80 percent of the daily budget. Consider an
    AWS Budgets alert on the Bedrock service as a backstop.
 
 At typical volumes (a handful of investigations per day, Sonnet 4.6, a few
 thousand tokens each), expect well under one dollar per day. Switch
-`ClaudeModelId` to Haiku 4.5 to cut per-investigation cost further.
+`ClaudeModelId` to Haiku 4.5 to cut per-investigation cost further. Email
+volume at these rates fits within the free tier of every supported provider.
 
 ## Statistics
 
@@ -230,6 +284,15 @@ regional deployment model above.
 - Deduplication (EventBridge is at-least-once), session cooldowns, the daily
   token budget, and investigation records share one pay-per-request DynamoDB
   table.
+- Email is sent directly by the Lambdas through the external provider's
+  HTTPS API (or SMTP), using only the Python standard library. Email
+  failures are logged and never block the chat notification. The provider
+  API key lives in an SSM SecureString parameter, fetched with decryption at
+  runtime and cached per execution environment.
+- Renaming note: this repository was previously published as
+  `clickops-notifier`. The stack name, metrics namespace, and AgentCore
+  Memory resource name changed with the rename; redeploying over an old
+  stack replaces the memory store, which rebuilds over time.
 
 ## Troubleshooting
 
@@ -240,6 +303,10 @@ regional deployment model above.
   Common causes: Bedrock model access not enabled for the inference profile,
   daily token budget exhausted, or AgentCore Memory unavailable in the
   region (memory degrades gracefully, Bedrock access does not).
+- No email arrives: check the Lambda logs for `email delivery failed`.
+  Common causes: SSM parameter missing in the deployment region, sender
+  domain not verified at the provider, or `EmailFrom` not set (email is
+  only enabled when both `NotificationEmail` and `EmailFrom` are set).
 - Slack or Teams silent: verify the workspace authorization in the Amazon Q
   Developer console and that the app is invited to the channel. Test by
   publishing a custom notification JSON to the chat topic from the SNS
@@ -251,13 +318,17 @@ regional deployment model above.
 ## Development
 
 ```bash
-make install   # venv plus dev dependencies
-make lint      # ruff
-make test      # pytest, no AWS credentials required
-make validate  # sam validate --lint
+make install        # venv plus dev dependencies
+make lint           # ruff
+make test           # pytest, no AWS credentials required
+make validate       # sam validate --lint
+make preview-email  # render the email templates to docs/email-preview.html
 ```
 
-CI runs the same three checks and is fully credential-free.
+CI runs lint, tests, template validation, and a pip-audit dependency scan,
+all credential-free. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines,
+[SECURITY.md](SECURITY.md) for vulnerability reporting, and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community standards.
 
 ## Future work
 

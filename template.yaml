@@ -1,16 +1,45 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
-  ClickOps Notifier. Detects manual AWS Console changes in real time via the
+  ClickOps Sentinel. Detects manual AWS Console changes in real time via the
   EventBridge default bus, investigates each detection with a Claude agent on
   Amazon Bedrock, and notifies via Amazon Q Developer chat channels (Slack,
-  Microsoft Teams) and email.
+  Microsoft Teams) and rich HTML email.
 
 Parameters:
   NotificationEmail:
     Type: String
     Default: ""
-    Description: Email address for notifications. Leave empty to disable email delivery.
+    Description: Recipient email address for rich HTML alerts. Leave empty to disable email delivery.
+  EmailFrom:
+    Type: String
+    Default: ""
+    Description: Verified sender address at your email provider (for example alerts@yourdomain.com). Required for email delivery.
+  EmailProvider:
+    Type: String
+    Default: resend
+    AllowedValues: ["resend", "postmark", "mailgun", "sendgrid", "smtp"]
+    Description: External email provider used for rich HTML alerts. No Amazon SES involved.
+  EmailApiKeyParam:
+    Type: String
+    Default: /clickops-sentinel/email-api-key
+    Description: Name of the SSM SecureString parameter holding the provider API key (or SMTP password). Create it before deploying with email enabled.
+  EmailSmtpHost:
+    Type: String
+    Default: ""
+    Description: SMTP server hostname. Only used when EmailProvider is smtp.
+  EmailSmtpPort:
+    Type: String
+    Default: "587"
+    Description: SMTP server port, 587 for STARTTLS or 465 for implicit TLS. Only used when EmailProvider is smtp.
+  EmailSmtpUsername:
+    Type: String
+    Default: ""
+    Description: SMTP username. Defaults to EmailFrom when empty. Only used when EmailProvider is smtp.
+  EmailMailgunDomain:
+    Type: String
+    Default: ""
+    Description: Mailgun sending domain. Only used when EmailProvider is mailgun.
   SlackWorkspaceId:
     Type: String
     Default: ""
@@ -93,7 +122,9 @@ Parameters:
     Description: Optional IAM permissions boundary ARN applied to all roles created by this stack.
 
 Conditions:
-  HasEmail: !Not [!Equals [!Ref NotificationEmail, ""]]
+  HasEmail: !And
+    - !Not [!Equals [!Ref NotificationEmail, ""]]
+    - !Not [!Equals [!Ref EmailFrom, ""]]
   HasSlack: !And
     - !Not [!Equals [!Ref SlackWorkspaceId, ""]]
     - !Not [!Equals [!Ref SlackChannelId, ""]]
@@ -139,26 +170,14 @@ Resources:
         Enabled: true
 
   # ---------------------------------------------------------------------
-  # Notification topics. The chat topic feeds Amazon Q Developer channel
-  # configurations; the email topic feeds the optional email subscription.
+  # Chat notification topic, feeding Amazon Q Developer channel
+  # configurations. Email is delivered directly by the Lambdas through an
+  # external provider (see EmailProvider), not through SNS.
   # ---------------------------------------------------------------------
   ChatTopic:
     Type: AWS::SNS::Topic
     Properties:
       KmsMasterKeyId: alias/aws/sns
-
-  EmailTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      KmsMasterKeyId: alias/aws/sns
-
-  EmailSubscription:
-    Type: AWS::SNS::Subscription
-    Condition: HasEmail
-    Properties:
-      TopicArn: !Ref EmailTopic
-      Protocol: email
-      Endpoint: !Ref NotificationEmail
 
   # ---------------------------------------------------------------------
   # Dead letter queue for failed async Lambda invocations.
@@ -175,7 +194,7 @@ Resources:
     Type: AWS::BedrockAgentCore::Memory
     Condition: AIEnabled
     Properties:
-      Name: ClickOpsNotifierMemory
+      Name: ClickOpsSentinelMemory
       Description: Long-term memory for ClickOps investigation verdicts and actor history.
       EventExpiryDuration: !Ref MemoryRetentionDays
       MemoryStrategies:
@@ -207,8 +226,15 @@ Resources:
         Variables:
           TABLE_NAME: !Ref StateTable
           CHAT_TOPIC_ARN: !Ref ChatTopic
-          EMAIL_TOPIC_ARN: !Ref EmailTopic
           EMAIL_ENABLED: !If [HasEmail, "true", "false"]
+          EMAIL_PROVIDER: !Ref EmailProvider
+          EMAIL_FROM: !Ref EmailFrom
+          EMAIL_TO: !Ref NotificationEmail
+          EMAIL_API_KEY_PARAM: !Ref EmailApiKeyParam
+          EMAIL_SMTP_HOST: !Ref EmailSmtpHost
+          EMAIL_SMTP_PORT: !Ref EmailSmtpPort
+          EMAIL_SMTP_USERNAME: !Ref EmailSmtpUsername
+          EMAIL_MAILGUN_DOMAIN: !Ref EmailMailgunDomain
           CHAT_ENABLED: !If [HasChat, "true", "false"]
           ENABLE_AI: !Ref EnableAIInvestigation
           INVESTIGATOR_FUNCTION_NAME: !Ref InvestigatorFunction
@@ -220,14 +246,21 @@ Resources:
             TableName: !Ref StateTable
         - SNSPublishMessagePolicy:
             TopicName: !GetAtt ChatTopic.TopicName
-        - SNSPublishMessagePolicy:
-            TopicName: !GetAtt EmailTopic.TopicName
         - LambdaInvokePolicy:
             FunctionName: !Ref InvestigatorFunction
         - Statement:
             - Effect: Allow
               Action: iam:ListAccountAliases
               Resource: "*"
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${EmailApiKeyParam}"
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
 
   ConsoleActionRule:
     Type: AWS::Events::Rule
@@ -304,8 +337,15 @@ Resources:
         Variables:
           TABLE_NAME: !Ref StateTable
           CHAT_TOPIC_ARN: !Ref ChatTopic
-          EMAIL_TOPIC_ARN: !Ref EmailTopic
           EMAIL_ENABLED: !If [HasEmail, "true", "false"]
+          EMAIL_PROVIDER: !Ref EmailProvider
+          EMAIL_FROM: !Ref EmailFrom
+          EMAIL_TO: !Ref NotificationEmail
+          EMAIL_API_KEY_PARAM: !Ref EmailApiKeyParam
+          EMAIL_SMTP_HOST: !Ref EmailSmtpHost
+          EMAIL_SMTP_PORT: !Ref EmailSmtpPort
+          EMAIL_SMTP_USERNAME: !Ref EmailSmtpUsername
+          EMAIL_MAILGUN_DOMAIN: !Ref EmailMailgunDomain
           CHAT_ENABLED: !If [HasChat, "true", "false"]
           MODEL_ID: !Sub "${BedrockGeoPrefix}.${ClaudeModelId}"
           MEMORY_ID: !If [AIEnabled, !GetAtt AgentMemory.MemoryId, ""]
@@ -314,15 +354,22 @@ Resources:
           MAX_AGENT_TURNS: !Ref MaxAgentTurns
           MAX_INVESTIGATION_TOKENS: "60000"
           MEMORY_RETENTION_DAYS: !Ref MemoryRetentionDays
-          METRICS_NAMESPACE: ClickOpsNotifier
+          METRICS_NAMESPACE: ClickOpsSentinel
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref StateTable
         - SNSPublishMessagePolicy:
             TopicName: !GetAtt ChatTopic.TopicName
-        - SNSPublishMessagePolicy:
-            TopicName: !GetAtt EmailTopic.TopicName
         - Statement:
+            - Effect: Allow
+              Action: ssm:GetParameter
+              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${EmailApiKeyParam}"
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub "ssm.${AWS::Region}.amazonaws.com"
             - Effect: Allow
               Action:
                 - bedrock:InvokeModel
@@ -339,7 +386,7 @@ Resources:
               Resource: "*"
               Condition:
                 StringEquals:
-                  cloudwatch:namespace: ClickOpsNotifier
+                  cloudwatch:namespace: ClickOpsSentinel
             - Effect: Allow
               Action:
                 - bedrock-agentcore:CreateEvent
@@ -450,7 +497,7 @@ Resources:
     Condition: AIEnabled
     Properties:
       AlarmDescription: Bedrock daily token budget is 80 percent consumed.
-      Namespace: ClickOpsNotifier
+      Namespace: ClickOpsSentinel
       MetricName: BudgetUsedPercent
       Statistic: Maximum
       Period: 300
@@ -465,9 +512,6 @@ Outputs:
   ChatTopicArn:
     Description: SNS topic feeding Amazon Q Developer chat channels.
     Value: !Ref ChatTopic
-  EmailTopicArn:
-    Description: SNS topic feeding the email subscription.
-    Value: !Ref EmailTopic
   StateTableName:
     Description: DynamoDB table with dedup, budget, and investigation records.
     Value: !Ref StateTable

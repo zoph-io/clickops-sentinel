@@ -15,6 +15,8 @@ import time
 import boto3
 from botocore.exceptions import ClientError
 
+import email_render
+import email_send
 import identity as identity_mod
 import notify
 import suppressed_actions as sup
@@ -135,30 +137,29 @@ def is_console_mutation(record: dict) -> tuple[bool, str]:
     return True, ""
 
 
-def publish_plain(record: dict, who: str, session_id: str) -> None:
-    alert = notify.build_plain_alert(record, who, get_account_label(record))
+def _publish_chat(alert: dict, thread_id: str) -> None:
     notify.publish(
         sns_client=_client("sns"),
         chat_topic_arn=os.environ["CHAT_TOPIC_ARN"],
-        email_topic_arn=os.environ["EMAIL_TOPIC_ARN"],
         chat_enabled=os.environ.get("CHAT_ENABLED") == "true",
-        email_enabled=os.environ.get("EMAIL_ENABLED") == "true",
         alert=alert,
-        thread_id=session_id,
+        thread_id=thread_id,
     )
+
+
+def publish_plain(record: dict, who: str, session_id: str) -> None:
+    account_label = get_account_label(record)
+    alert = notify.build_plain_alert(record, who, account_label)
+    _publish_chat(alert, session_id)
+    email = email_render.plain_email(record, who, account_label)
+    email_send.send_email(email["subject"], email["html"], alert["text"])
 
 
 def publish_followup(record: dict, who: str, session_id: str) -> None:
     alert = notify.build_followup_note(record, who)
-    notify.publish(
-        sns_client=_client("sns"),
-        chat_topic_arn=os.environ["CHAT_TOPIC_ARN"],
-        email_topic_arn=os.environ["EMAIL_TOPIC_ARN"],
-        chat_enabled=os.environ.get("CHAT_ENABLED") == "true",
-        email_enabled=os.environ.get("EMAIL_ENABLED") == "true",
-        alert=alert,
-        thread_id=session_id,
-    )
+    _publish_chat(alert, session_id)
+    email = email_render.note_email(alert["title"], alert["text"])
+    email_send.send_email(email["subject"], email["html"], alert["text"])
 
 
 def invoke_investigator(record: dict, who: dict, account_label: str, session_id: str) -> None:
@@ -241,18 +242,12 @@ def handle_console_login(record: dict) -> dict:
         return {"decision": "deduplicated"}
 
     who = identity_mod.extract_identity(record)
-    alert = notify.build_login_alert(
-        record, who["display"], get_account_label(record), ", ".join(reasons)
-    )
-    notify.publish(
-        sns_client=_client("sns"),
-        chat_topic_arn=os.environ["CHAT_TOPIC_ARN"],
-        email_topic_arn=os.environ["EMAIL_TOPIC_ARN"],
-        chat_enabled=os.environ.get("CHAT_ENABLED") == "true",
-        email_enabled=os.environ.get("EMAIL_ENABLED") == "true",
-        alert=alert,
-        thread_id=f"signin-{event_id}",
-    )
+    account_label = get_account_label(record)
+    reason = ", ".join(reasons)
+    alert = notify.build_login_alert(record, who["display"], account_label, reason)
+    _publish_chat(alert, f"signin-{event_id}")
+    email = email_render.login_email(record, who["display"], account_label, reason)
+    email_send.send_email(email["subject"], email["html"], alert["text"])
     log_decision(event_id, "login-alert", reasons=reasons)
     return {"decision": "login-alert"}
 
