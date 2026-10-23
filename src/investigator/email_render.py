@@ -12,6 +12,9 @@ packages each CodeUri separately. Keep both copies identical.
 
 import html
 
+import criticality
+import ip_intel
+
 DARK = "#0f1420"
 BRAND_COLOR = "#7dd3fc"
 MUTED = "#64748b"
@@ -145,12 +148,27 @@ def _pill(label: str, background: str, color: str) -> str:
     )
 
 
-def _who_block(who: str, source_ip: str, event_time: str) -> str:
+def _who_block(who: str, source_ip: str, event_time: str, ip_info: dict | None = None) -> str:
+    network_html = ""
+    if ip_info:
+        parts = [_esc(part) for part in (ip_intel.network(ip_info), ip_intel.place(ip_info))]
+        network_html = (
+            f'<div style="color:{MUTED};font-size:12px;margin-top:2px;">'
+            + " &middot; ".join(part for part in parts if part)
+            + "</div>"
+        )
+        if ip_info.get("flags"):
+            flags = ", ".join(flag.upper() for flag in ip_info["flags"])
+            network_html += (
+                '<div style="color:#991b1b;font-size:11px;font-weight:700;margin-top:2px;">'
+                f"Source flagged: {_esc(flags)}</div>"
+            )
     return (
         '<tr><td style="padding:18px 24px 4px 24px;">'
         f'<div style="color:{DARK};font-size:14px;"><b>{_esc(who)}</b></div>'
         f'<div style="color:{FAINT};font-size:12px;font-family:monospace;'
         f'margin-top:2px;">{_esc(source_ip)} &middot; {_esc(event_time)}</div>'
+        f"{network_html}"
         "</td></tr>"
     )
 
@@ -171,20 +189,70 @@ def _card(label: str, value: str, detail: str, background: str, color: str) -> s
     )
 
 
-def _cards_row(record: dict, verdict: dict) -> str:
+def _cards_row(record: dict, verdict: dict, rating: dict | None = None) -> str:
     event_name = record.get("eventName", "UnknownEvent")
     service = _service_slug(record.get("eventSource", ""))
     severity = verdict.get("security_severity", "none")
     cost = verdict.get("cost_impact", "negligible")
     severity_bg, severity_fg = SEVERITY_STYLES.get(severity, SEVERITY_STYLES["none"])
     cost_bg, cost_fg = COST_STYLES.get(cost, COST_STYLES["negligible"])
+    rule_id = rating["rule_id"] if rating else ""
     return (
         '<tr><td style="padding:12px 18px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
         + _card("ACTION", event_name, service, "#f1f5f9", "#334155")
-        + _card("SECURITY", severity.upper(), "", severity_bg, severity_fg)
+        + _card("SECURITY", severity.upper(), rule_id, severity_bg, severity_fg)
         + _card("COST IMPACT", cost.upper(), "", cost_bg, cost_fg)
         + "</tr></table></td></tr>"
+    )
+
+
+def _criticality_block(rating: dict | None, agent_severity: str = "") -> str:
+    """Catalog match: rule, tactic, ATT&CK and Stratus references, reasons."""
+    if not rating:
+        return ""
+    level = rating["level"]
+    background, color = SEVERITY_STYLES.get(level, SEVERITY_STYLES["none"])
+    lines = [
+        f'<div style="color:{DARK};font-size:14px;font-weight:700;">'
+        f"{_esc(rating['rule_id'])} &middot; {_esc(rating['title'])}</div>"
+    ]
+    meta = []
+    if rating.get("tactic"):
+        meta.append(_esc(rating["tactic"]))
+    for technique in rating.get("techniques", []):
+        name = criticality.TECHNIQUES.get(technique, "")
+        meta.append(
+            f'<a href="{_esc(criticality.technique_url(technique))}" '
+            f'style="color:{color};font-weight:700;">{_esc(technique)}</a> {_esc(name)}'
+        )
+    if meta:
+        lines.append(
+            f'<div style="color:{BODY_TEXT};font-size:12px;">{" &middot; ".join(meta)}</div>'
+        )
+    if rating.get("stratus"):
+        lines.append(
+            f'<div style="color:{MUTED};font-size:12px;font-family:monospace;">'
+            f"Stratus Red Team: {_esc(', '.join(rating['stratus']))}</div>"
+        )
+    if rating.get("reasons"):
+        lines.append(
+            f'<div style="color:{BODY_TEXT};font-size:12px;">'
+            f"Why: {_esc('; '.join(rating['reasons']))}</div>"
+        )
+    if agent_severity and agent_severity != level:
+        lines.append(
+            f'<div style="color:{MUTED};font-size:11px;">'
+            f"Agent rated {_esc(agent_severity.upper())}, raised to the catalog floor.</div>"
+        )
+    return (
+        '<tr><td style="padding:8px 24px;">'
+        f'<div style="color:{MUTED};font-size:10px;font-weight:700;letter-spacing:.5px;">'
+        f"CRITICALITY CATALOG &middot; {_esc(level.upper())}</div>"
+        f'<div style="background:{background};border-left:4px solid {color};'
+        f'border-radius:6px;padding:10px 12px;margin-top:4px;">'
+        + "".join(lines)
+        + "</div></td></tr>"
     )
 
 
@@ -236,6 +304,13 @@ def _path_step(step: dict, is_last: bool) -> str:
     when = _esc(_short_time(step.get("time", "")))
     error = step.get("errorCode")
     meta = when + (f" &middot; failed ({_esc(error)})" if error else "")
+    level = step.get("criticality", "")
+    if criticality.RANK.get(level, 0) >= criticality.RANK["medium"]:
+        level_color = SEVERITY_STYLES[level][1]
+        meta += (
+            f' &middot; <span style="color:{level_color};font-weight:700;">'
+            f"{_esc(level.upper())} {_esc(step.get('rule', ''))}</span>"
+        )
 
     if highlighted:
         body = (
@@ -319,7 +394,13 @@ def mark_highlighted_step(session_steps: list, record: dict) -> list:
 
 
 def enriched_email(
-    record: dict, who: str, account_label: str, verdict: dict, session_steps: list
+    record: dict,
+    who: str,
+    account_label: str,
+    verdict: dict,
+    session_steps: list,
+    rating: dict | None = None,
+    ip_info: dict | None = None,
 ) -> dict:
     """Full rich email for an agent verdict: cards, session path, callout."""
     event_name = record.get("eventName", "UnknownEvent")
@@ -339,9 +420,12 @@ def enriched_email(
         history = ""
 
     body = (
-        _who_block(who, record.get("sourceIPAddress", "unknown"), record.get("eventTime", ""))
-        + _cards_row(record, verdict)
+        _who_block(
+            who, record.get("sourceIPAddress", "unknown"), record.get("eventTime", ""), ip_info
+        )
+        + _cards_row(record, verdict, rating)
         + _section("PURPOSE", verdict.get("purpose", ""))
+        + _criticality_block(rating, verdict.get("agent_security_severity", ""))
         + _session_path(session_steps)
         + _section("SESSION", verdict.get("session_narrative", ""))
         + _section("SECURITY", verdict.get("security_analysis", ""))
@@ -351,13 +435,21 @@ def enriched_email(
         + _cta(link)
     )
     header = _header("Manual console change detected", account_label, region, pills)
+    prefix = criticality.title_prefix(verdict.get("security_severity", ""))
     return {
-        "subject": f"ClickOps detected: {event_name}",
+        "subject": f"{prefix}ClickOps detected: {event_name}",
         "html": _document(header, body),
     }
 
 
-def plain_email(record: dict, who: str, account_label: str, note: str = "") -> dict:
+def plain_email(
+    record: dict,
+    who: str,
+    account_label: str,
+    note: str = "",
+    rating: dict | None = None,
+    ip_info: dict | None = None,
+) -> dict:
     """Detection email without agent-derived sections."""
     event_name = record.get("eventName", "UnknownEvent")
     event_source = record.get("eventSource", "unknown")
@@ -368,12 +460,21 @@ def plain_email(record: dict, who: str, account_label: str, note: str = "") -> d
     if record.get("errorCode"):
         action_note = f"failed ({record['errorCode']})"
 
+    level = criticality.level_of(rating)
+    if level:
+        level_bg, level_fg = SEVERITY_STYLES.get(level, SEVERITY_STYLES["none"])
+        level_card = _card("CRITICALITY", level.upper(), rating["rule_id"], level_bg, level_fg)
+    else:
+        level_card = _card("CRITICALITY", "UNRATED", "no catalog match", "#f1f5f9", "#334155")
+
     body = (
-        _who_block(who, record.get("sourceIPAddress", "unknown"), record.get("eventTime", ""))
+        _who_block(
+            who, record.get("sourceIPAddress", "unknown"), record.get("eventTime", ""), ip_info
+        )
         + '<tr><td style="padding:12px 18px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
         + _card("ACTION", event_name, _service_slug(event_source), "#f1f5f9", "#334155")
-        + _card("REGION", region, "", "#f1f5f9", "#334155")
+        + level_card
         + _card(
             "RESULT",
             "FAILED" if action_note else "APPLIED",
@@ -382,17 +483,20 @@ def plain_email(record: dict, who: str, account_label: str, note: str = "") -> d
             "#991b1b" if action_note else "#334155",
         )
         + "</tr></table></td></tr>"
+        + _criticality_block(rating)
         + _section("NOTE", note)
         + _cta(link)
     )
     header = _header("Manual console change detected", account_label, region, "")
     return {
-        "subject": f"ClickOps detected: {event_name}",
+        "subject": f"{criticality.title_prefix(level)}ClickOps detected: {event_name}",
         "html": _document(header, body),
     }
 
 
-def login_email(record: dict, who: str, account_label: str, reason: str) -> dict:
+def login_email(
+    record: dict, who: str, account_label: str, reason: str, ip_info: dict | None = None
+) -> dict:
     """Console sign-in alert email."""
     region = record.get("awsRegion", "us-east-1")
     outcome = (record.get("responseElements") or {}).get("ConsoleLogin", "Unknown")
@@ -400,7 +504,9 @@ def login_email(record: dict, who: str, account_label: str, reason: str) -> dict
 
     pills = _pill(reason.upper(), "#ef4444", "#ffffff")
     body = (
-        _who_block(who, record.get("sourceIPAddress", "unknown"), record.get("eventTime", ""))
+        _who_block(
+            who, record.get("sourceIPAddress", "unknown"), record.get("eventTime", ""), ip_info
+        )
         + '<tr><td style="padding:12px 18px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
         + _card("OUTCOME", outcome, "", "#f1f5f9", "#334155")

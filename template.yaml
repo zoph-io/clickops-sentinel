@@ -106,6 +106,20 @@ Parameters:
     Type: String
     Default: ""
     Description: Comma-separated additions to the built-in suppression list, format service:ActionName (for example glue:StartJobRun,ce:CreateReport).
+  CriticalityOverrides:
+    Type: String
+    Default: ""
+    Description: Comma-separated re-ratings of the criticality catalog, format service:ActionName=level with level none, low, medium, high, or critical (for example ec2:CreateVpc=high,iam:CreateRole=low). Parameter checks still apply.
+  IpLookupProvider:
+    Type: String
+    Default: ipinfo
+    AllowedValues: ["ipinfo", "none"]
+    Description: Source IP enrichment (network owner, approximate location, VPN or hosting flags). ipinfo sends public source IPs to ipinfo.io; none disables enrichment.
+  IpLookupTokenParam:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^/.*"
+    Description: Optional name of an SSM SecureString parameter holding an ipinfo.io token, starting with a slash (for example /clickops-sentinel/ipinfo-token). Empty uses the unauthenticated tier.
   AccountFriendlyName:
     Type: String
     Default: ""
@@ -136,6 +150,7 @@ Conditions:
   AIEnabled: !Equals [!Ref EnableAIInvestigation, "true"]
   ConsoleLoginAlertsEnabled: !Equals [!Ref EnableConsoleLoginAlerts, "true"]
   HasBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, ""]]
+  HasIpLookupToken: !Not [!Equals [!Ref IpLookupTokenParam, ""]]
 
 Globals:
   Function:
@@ -144,6 +159,10 @@ Globals:
     Environment:
       Variables:
         LOG_LEVEL: INFO
+        STACK_NAME: !Ref AWS::StackName
+        CRITICALITY_OVERRIDES: !Ref CriticalityOverrides
+        IP_LOOKUP_PROVIDER: !Ref IpLookupProvider
+        IP_LOOKUP_TOKEN_PARAM: !Ref IpLookupTokenParam
 
 Resources:
 
@@ -254,7 +273,12 @@ Resources:
               Resource: "*"
             - Effect: Allow
               Action: ssm:GetParameter
-              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${EmailApiKeyParam}"
+              Resource:
+                - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${EmailApiKeyParam}"
+                - !If
+                  - HasIpLookupToken
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${IpLookupTokenParam}"
+                  - !Ref AWS::NoValue
             - Effect: Allow
               Action: kms:Decrypt
               Resource: "*"
@@ -363,7 +387,12 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: ssm:GetParameter
-              Resource: !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${EmailApiKeyParam}"
+              Resource:
+                - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${EmailApiKeyParam}"
+                - !If
+                  - HasIpLookupToken
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${IpLookupTokenParam}"
+                  - !Ref AWS::NoValue
             - Effect: Allow
               Action: kms:Decrypt
               Resource: "*"

@@ -13,10 +13,12 @@ ignore = [
 known-first-party = [
     "agent_loop",
     "budget",
+    "criticality",
     "email_render",
     "email_secret",
     "email_send",
     "identity",
+    "ip_intel",
     "memory",
     "messages",
     "notify",

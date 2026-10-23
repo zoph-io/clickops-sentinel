@@ -33,6 +33,14 @@ and cost, what else they did in the same session, and what to do next.
 - **Security and FinOps in one alert.** Each alert rates security severity
   (privilege escalation, public exposure, weakened defenses) and cost impact
   with a rough monthly dollar range, including savings.
+- **A criticality scale you can audit.** Every change is rated against a
+  published catalog of risky AWS actions (AWS Organizations changes, logging
+  and detection tampering, credential backdoors, public exposure) mapped to
+  MITRE ATT&CK and Stratus Red Team. The AI can raise a rating, never lower
+  it, and critical changes are always investigated.
+- **Know where the click came from.** The source IP is resolved to its
+  network (ISP or hosting provider) and approximate location, with VPN,
+  proxy, and Tor flags when available.
 - **Hard to evade from the console.** Detection relies on a flag that AWS
   sets server-side on console credentials, not on user-agent strings, so
   spoofed user agents, role switching, and CloudShell are all still caught.
@@ -118,9 +126,12 @@ well as, email, see [Slack and Microsoft Teams setup](#slack-and-microsoft-teams
    EventBridge default bus, free of charge. A rule matches events where
    `sessionCredentialFromConsole` is true and `readOnly` is false, which
    means a mutating action made with console credentials.
-2. **Filter.** The detector Lambda drops known console noise, deduplicates
-   (EventBridge delivers at least once), and starts at most one
-   investigation per console session every 30 minutes.
+2. **Filter and rate.** The detector Lambda drops known console noise,
+   deduplicates (EventBridge delivers at least once), rates the change
+   against the [criticality catalog](#criticality-scale-and-catalog), looks
+   up the [source IP](#source-ip-enrichment), and starts at most one
+   investigation per console session every 30 minutes. Critical changes
+   skip that cooldown.
 3. **Investigate.** The investigator Lambda runs a small Claude agent loop
    on the Bedrock Converse API. Using read-only tools, it replays the session
    from CloudTrail Event History, looks at adjacent activity from the same
@@ -136,6 +147,7 @@ flowchart LR
     CT --> EB[EventBridge default bus rule]
     EB -->|"sessionCredentialFromConsole=true, readOnly=false"| DET[Detector Lambda]
     DET -->|suppressed or duplicate| Drop[Ignore]
+    DET <-->|source IP| IPI[IP lookup provider]
     DET -->|async invoke| INV[Investigator Lambda, Claude agent]
     INV <-->|session retrace, adjacent changes| CTH[CloudTrail Event History]
     INV <-->|actor history and verdicts| MEM[AgentCore Memory]
@@ -163,8 +175,14 @@ the same IP, consults its long-term memory about the actor, and produces:
 - a verdict (`manual-change-confirmed`, `likely-sanctioned-activity`,
   `suspicious`) with confidence
 - a purpose assessment: what the user was apparently trying to accomplish
-- security implications with a severity rating: privilege escalation, public
-  exposure, weakened defenses, secrets handling
+- security implications with a severity rating on the
+  [criticality scale](#criticality-scale-and-catalog), never below the
+  catalog floor: privilege escalation, public exposure, weakened defenses,
+  secrets handling
+- the matching catalog rule with its MITRE ATT&CK technique and Stratus Red
+  Team reference
+- the source network and approximate location, compared with the rest of
+  the session and the actor's usual networks
 - FinOps implications with a cost impact rating and rough monthly dollar
   range: instance launches, provisioned capacity, perpetual-billing
   resources, and also savings
@@ -173,7 +191,81 @@ the same IP, consults its long-term memory about the actor, and produces:
 - a recommendation: import into IaC, revert, ask the user, or ignore
 
 Delivery is guaranteed: if Bedrock is unavailable or the daily token budget
-is spent, the alert still goes out on a plain, non-AI path.
+is spent, the alert still goes out on a plain, non-AI path, which keeps the
+catalog rating and the source network.
+
+### Criticality scale and catalog
+
+Every change is rated on a five-level scale before the agent sees it, by a
+deterministic catalog that needs no AI:
+
+| Level | Meaning | Expected response |
+| --- | --- | --- |
+| critical | Disables audit logging or threat detection, changes the AWS Organization or its guardrails, grants administrator access or a cross-account backdoor, or exposes data publicly. | Act now: confirm with the actor and contain. |
+| high | Creates credentials or privileges, weakens authentication, opens internet exposure, runs code or commands on existing resources, or destroys data without a recovery path. | Review the same day. |
+| medium | Changes a security control with limited blast radius: private-range firewall rules, encryption or key state, backups and retention, account-scoped resource policies. | Review within the week. |
+| low | Ordinary resource change with no exposure or privilege change. | Codify in IaC or revert during routine drift cleanup. |
+| none | Cosmetic change only, such as tags or descriptions. | No action. |
+
+The catalog maps about 80 rules covering 190 CloudTrail actions to a level, a
+MITRE ATT&CK tactic and technique, and the matching
+[Stratus Red Team](https://stratus-red-team.cloud/attack-techniques/AWS/)
+attack technique. It covers AWS Organizations (leaving the organization,
+detaching SCPs, delegated administrators), audit and detection tampering
+(CloudTrail, Config, GuardDuty, Security Hub, flow logs), identity
+backdoors (access keys, login profiles, trust policies, SAML providers,
+Identity Center), data exposure (public snapshots, AMIs, bucket policies),
+destruction (KMS key deletion, backups), and abuse patterns such as GPU
+instance launches for cryptomining and Bedrock model access for LLMjacking.
+
+How a rating is computed:
+
+- Parameter checks read the request and raise the level. For example, a
+  security group rule opened to `0.0.0.0/0` on SSH or a database port is
+  critical, on another port high, and on a private range medium.
+- Changes by the root user, and changes to ClickOps Sentinel's own
+  resources, are rated at least high.
+- Failed calls are lowered one level and marked as attempts.
+- The rating is a floor. The agent may raise the severity from context (a
+  chain of risky actions, an unusual network or country, a VPN or hosting
+  source) but never lower it, and uses its verdict to say whether a risky
+  change looks sanctioned.
+- Critical changes bypass the session cooldown, so they are always
+  investigated on their own. High and critical alerts carry the level in
+  the email subject and chat title (`[CRITICAL] ClickOps detected: ...`)
+  for filtering and routing.
+
+The full referential is published in
+[docs/criticality-catalog.md](docs/criticality-catalog.md), generated from
+the code. Adapt it to your environment with `CriticalityOverrides`, for
+example `ec2:CreateVpc=high,iam:CreateRole=low`. Parameter checks still
+apply to overridden actions, so an override cannot hide a public exposure.
+
+### Source IP enrichment
+
+Alerts show who owns the source IP (ISP, corporate network, or hosting
+provider, with its AS number) and its approximate location, plus VPN,
+proxy, Tor, or hosting flags when the provider reports them. The agent uses
+this to spot a session that changes country or network, or an actor working
+from somewhere new. Console sign-in alerts are enriched too.
+
+Lookups go to [ipinfo.io](https://ipinfo.io) over HTTPS, once per IP and
+Lambda execution environment, with a 3 second timeout. Private addresses
+and values such as `AWS Internal` are never sent. If the lookup fails, the
+alert goes out without it. Location is city-level at best and can be off
+for mobile and corporate networks.
+
+- The unauthenticated tier is enough for typical alert volumes. For higher
+  limits, or the privacy flags of paid plans, store an ipinfo token in SSM
+  and set `IpLookupTokenParam`:
+
+  ```bash
+  aws ssm put-parameter --name /clickops-sentinel/ipinfo-token \
+    --type SecureString --value "your_token"
+  ```
+
+- Source IPs are personal data in many jurisdictions. Set
+  `IpLookupProvider=none` to keep them inside your account.
 
 ### How ClickOps Sentinel compares
 
@@ -312,6 +404,9 @@ Changes made by one console session are grouped into the same message thread.
 | `MaxAgentTurns` | `8` | Agent loop iterations per investigation. |
 | `MemoryRetentionDays` | `180` | Retention for AgentCore Memory and investigation records. |
 | `ExtraSuppressedActions` | empty | Comma-separated `service:Action` additions to the suppression list. |
+| `CriticalityOverrides` | empty | Comma-separated `service:Action=level` re-ratings of the [criticality catalog](#criticality-scale-and-catalog). |
+| `IpLookupProvider` | `ipinfo` | [Source IP enrichment](#source-ip-enrichment): `ipinfo` or `none`. |
+| `IpLookupTokenParam` | empty | Optional SSM SecureString parameter holding an ipinfo.io token. |
 | `AccountFriendlyName` | empty | Account name in alerts. Empty resolves the IAM account alias. |
 | `LambdaMemorySize` | `128` | Detector Lambda memory. |
 | `PermissionsBoundaryArn` | empty | Permissions boundary applied to all created IAM roles. |
@@ -344,7 +439,8 @@ volume at these rates fits within the free tier of every supported provider.
 ## Statistics
 
 Every investigation writes a structured record (actor, action, verdict,
-purpose, security severity, cost impact, tokens) to DynamoDB, retained for
+purpose, security severity, catalog rule, source country and network, cost
+impact, tokens) to DynamoDB, retained for
 `MemoryRetentionDays`. This is also a reviewable audit record of break-glass
 console activity that can later be codified in IaC or reverted.
 
@@ -353,7 +449,8 @@ make stats DAYS=30
 ```
 
 prints investigation counts, top actors, verdict and severity breakdowns,
-cost impact distribution, and total token spend.
+catalog rules matched, source countries and networks, cost impact
+distribution, and total token spend.
 
 ## Detection scope and trade-offs
 
@@ -428,6 +525,13 @@ make deploy REGION=eu-west-1
   Developer console and that the app is invited to the channel. Test by
   publishing a custom notification JSON to the chat topic from the SNS
   console.
+- No source network in alerts: check the Lambda logs for `IP lookup
+  failed`. Common causes: the event's source is not a public IP (for
+  example `AWS Internal`), the provider's unauthenticated rate limit (set
+  `IpLookupTokenParam`), or `IpLookupProvider=none`.
+- A rating that does not fit your environment: re-rate the action with
+  `CriticalityOverrides`, and consider opening an issue if the default is
+  wrong for everyone.
 - Noisy action you want silenced: add `service:ActionName` to
   `ExtraSuppressedActions`, and consider opening an issue so it can join the
   default list.
@@ -440,6 +544,7 @@ make lint           # ruff
 make test           # pytest, no AWS credentials required
 make validate       # sam validate --lint
 make preview-email  # render the email templates to docs/email-preview.html
+make catalog-doc    # regenerate docs/criticality-catalog.md after catalog edits
 ```
 
 CI runs lint, tests, template validation, and a pip-audit dependency scan,

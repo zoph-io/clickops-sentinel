@@ -98,6 +98,15 @@ def test_tool_output_is_truncated():
     assert len(result) <= tools.MAX_TOOL_OUTPUT_CHARS + len("...(truncated)")
 
 
+def test_summarize_tags_catalog_rating():
+    summary = tools.summarize_cloudtrail_event(sample_events.CLOUDTRAIL_STOP)
+    assert (summary["criticality"], summary["rule"]) == ("critical", "LOG-001")
+    untagged = tools.summarize_cloudtrail_event(
+        {**sample_events.CONSOLE_MUTATION, "eventName": "CreateTags"}
+    )
+    assert "criticality" not in untagged
+
+
 def test_summarize_keeps_key_fields_and_truncates_parameters():
     summary = tools.summarize_cloudtrail_event(
         {

@@ -67,6 +67,9 @@ def main() -> None:
     severities = Counter()
     cost_impacts = Counter()
     services = Counter()
+    rules = Counter()
+    countries = Counter()
+    networks = Counter()
     total_tokens = 0
     for item in items:
         actors[item.get("actor", {}).get("S", "unknown")] += 1
@@ -74,6 +77,9 @@ def main() -> None:
         severities[item.get("security_severity", {}).get("S", "none")] += 1
         cost_impacts[item.get("cost_impact", {}).get("S", "negligible")] += 1
         services[item.get("event_source", {}).get("S", "unknown")] += 1
+        rules[item.get("criticality_rule", {}).get("S", "unrated")] += 1
+        countries[item.get("source_country", {}).get("S", "unknown")] += 1
+        networks[item.get("source_network", {}).get("S", "unknown")] += 1
         total_tokens += int(item.get("tokens_used", {}).get("N", "0"))
 
     print(f"ClickOps investigations, last {args.days} days: {len(items)}")
@@ -83,6 +89,9 @@ def main() -> None:
     print_counter("Security severity", severities)
     print_counter("Cost impact", cost_impacts)
     print_counter("Services touched", services)
+    print_counter("Criticality catalog rules", rules)
+    print_counter("Source countries", countries)
+    print_counter("Source networks", networks)
 
 
 if __name__ == "__main__":

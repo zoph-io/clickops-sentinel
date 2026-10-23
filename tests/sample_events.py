@@ -94,6 +94,46 @@ UNKNOWN_IDENTITY_EVENT = {
     "userIdentity": {"type": "Unknown", "principalId": "odd-principal-string"},
 }
 
+CLOUDTRAIL_STOP = {
+    **copy.deepcopy(CONSOLE_MUTATION),
+    "eventID": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+    "eventSource": "cloudtrail.amazonaws.com",
+    "eventName": "StopLogging",
+    "requestParameters": {
+        "name": "arn:aws:cloudtrail:us-east-1:123456789012:trail/org-trail"
+    },
+}
+
+SG_OPEN_SSH = {
+    **copy.deepcopy(CONSOLE_MUTATION),
+    "eventID": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+    "eventName": "AuthorizeSecurityGroupIngress",
+    "requestParameters": {
+        "groupId": "sg-0123456789abcdef0",
+        "ipPermissions": {
+            "items": [
+                {
+                    "ipProtocol": "tcp",
+                    "fromPort": 22,
+                    "toPort": 22,
+                    "ipRanges": {"items": [{"cidrIp": "0.0.0.0/0"}]},
+                }
+            ]
+        },
+    },
+}
+
+# Normalized ip_intel.lookup() output for the CONSOLE_MUTATION source IP.
+IP_INFO = {
+    "ip": "203.0.113.10",
+    "city": "Paris",
+    "region": "Ile-de-France",
+    "country": "FR",
+    "asn": "AS3215",
+    "isp": "Orange S.A.",
+    "flags": [],
+}
+
 ROOT_LOGIN = {
     "eventVersion": "1.09",
     "eventID": "88888888-8888-8888-8888-888888888888",

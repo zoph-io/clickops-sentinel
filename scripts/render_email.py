@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import sample_events  # noqa: E402
 
+import criticality  # noqa: E402
 import email_render  # noqa: E402
 
 VERDICT = {
@@ -48,16 +49,21 @@ def main() -> None:
     output = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "docs" / "email-preview.html"
 
     record = dict(sample_events.CONSOLE_MUTATION)
+    ip_info = sample_events.IP_INFO
     steps = email_render.mark_highlighted_step(SESSION_STEPS, record)
     enriched = email_render.enriched_email(
-        record, "alice@example.com", "prod (123456789012)", VERDICT, steps
+        record, "alice@example.com", "prod (123456789012)", VERDICT, steps,
+        criticality.classify(record, overrides="", stack_name=""), ip_info,
     )
+    exposure = dict(sample_events.SG_OPEN_SSH)
     plain = email_render.plain_email(
-        record, "alice@example.com", "prod (123456789012)",
+        exposure, "alice@example.com", "prod (123456789012)",
         "AI investigation unavailable, plain alert.",
+        criticality.classify(exposure, overrides="", stack_name=""),
+        {**ip_info, "flags": ["vpn", "hosting"]},
     )
     login = email_render.login_email(
-        sample_events.ROOT_LOGIN, "Root user", "prod (123456789012)", "root sign-in"
+        sample_events.ROOT_LOGIN, "Root user", "prod (123456789012)", "root sign-in", ip_info
     )
 
     separator = '<div style="height:32px;"></div>'

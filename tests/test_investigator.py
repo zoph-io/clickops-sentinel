@@ -113,9 +113,98 @@ def test_verdict_produces_enriched_notification(
     # Rich email sent with the session path.
     fakes["email"].assert_called_once()
     subject, html, text = fakes["email"].call_args.args
-    assert subject == "ClickOps detected: RunInstances"
+    # High and critical alerts carry the level for mail filtering.
+    assert subject == "[HIGH] ClickOps detected: RunInstances"
     assert "CONSOLE SESSION PATH" in html
     assert "RunInstances" in html
+
+
+def test_payload_ip_info_is_used_without_a_second_lookup(
+    investigator_handler, base_env, monkeypatch
+):
+    fakes = wire(investigator_handler, monkeypatch)
+    monkeypatch.setattr(investigator_handler.budget, "tokens_used_today", lambda *args: 0)
+    lookup = MagicMock()
+    monkeypatch.setattr(investigator_handler.ip_intel, "lookup", lookup)
+    seen = {}
+
+    def fake_run(record, identity, account_label, session_id, rating, ip_info):
+        seen.update(rating=rating, ip_info=ip_info)
+        return dict(VERDICT)
+
+    monkeypatch.setattr(investigator_handler, "run_investigation", fake_run)
+    data = {**payload(), "ip_info": sample_events.IP_INFO}
+    investigator_handler.lambda_handler(data, None)
+    lookup.assert_not_called()
+    assert seen["ip_info"]["country"] == "FR"
+    assert seen["rating"]["rule_id"] == "CMP-005"
+    body = chat_payloads(fakes["sns"])[0]["content"]["description"]
+    assert "*Catalog*: CMP-005" in body
+    assert "*Source network*: AS3215 Orange S.A." in body
+
+
+def test_plain_fallback_keeps_criticality(investigator_handler, base_env, monkeypatch):
+    fakes = wire(investigator_handler, monkeypatch)
+    monkeypatch.setattr(investigator_handler.budget, "tokens_used_today", lambda *args: 0)
+    monkeypatch.setattr(investigator_handler, "run_investigation", lambda *args: None)
+    data = {**payload(), "record": dict(sample_events.CLOUDTRAIL_STOP)}
+    investigator_handler.lambda_handler(data, None)
+    content = chat_payloads(fakes["sns"])[0]["content"]
+    assert content["title"] == "[CRITICAL] ClickOps detected: StopLogging"
+    assert content["description"].startswith("*Criticality*: CRITICAL. LOG-001")
+
+
+def test_catalog_floor_raises_agent_severity(investigator_handler, base_env, monkeypatch):
+    fakes = wire(investigator_handler, monkeypatch)
+    captured = {}
+
+    def fake_agent(**kwargs):
+        captured.update(kwargs)
+        return {**VERDICT, "security_severity": "low"}, {"inputTokens": 10, "outputTokens": 5}
+
+    monkeypatch.setattr(investigator_handler.agent_loop, "run_agent", fake_agent)
+    monkeypatch.setattr(investigator_handler.budget, "consume_tokens", lambda *args: 15)
+    monkeypatch.setattr(investigator_handler.memory, "save_investigation", lambda **kw: None)
+    data = payload()
+    record = dict(sample_events.CLOUDTRAIL_STOP)
+    verdict = investigator_handler.run_investigation(
+        record, data["identity"], data["account_label"], data["session_id"],
+        None, sample_events.IP_INFO,
+    )
+    assert verdict["security_severity"] == "critical"
+    assert verdict["agent_security_severity"] == "low"
+    # The agent saw the catalog rating and the source network.
+    assert '"rule_id": "LOG-001"' in captured["user_prompt"]
+    assert "AS3215 Orange S.A., near Paris" in captured["user_prompt"]
+    assert "- critical:" in captured["system_prompt"]
+    # The record keeps the rule and source for statistics.
+    item = fakes["dynamodb"].put_item.call_args.kwargs["Item"]
+    assert item["criticality_rule"]["S"] == "LOG-001"
+    assert item["source_country"]["S"] == "FR"
+    assert item["source_network"]["S"] == "AS3215 Orange S.A."
+    assert item["security_severity"]["S"] == "critical"
+
+
+def test_ip_tool_is_offered_only_when_lookup_is_enabled(
+    investigator_handler, base_env, monkeypatch
+):
+    wire(investigator_handler, monkeypatch)
+    offered = []
+
+    def fake_agent(**kwargs):
+        offered.append({spec["toolSpec"]["name"] for spec in kwargs["tool_specs"]})
+        assert set(kwargs["tool_dispatch"]) == offered[-1]
+        return None, {"inputTokens": 0, "outputTokens": 0}
+
+    monkeypatch.setattr(investigator_handler.agent_loop, "run_agent", fake_agent)
+    monkeypatch.setattr(investigator_handler.budget, "consume_tokens", lambda *args: 0)
+    data = payload()
+    args = (data["record"], data["identity"], data["account_label"], data["session_id"])
+    investigator_handler.run_investigation(*args)
+    monkeypatch.setenv("IP_LOOKUP_PROVIDER", "ipinfo")
+    investigator_handler.run_investigation(*args)
+    assert "lookup_ip_intel" not in offered[0]
+    assert "lookup_ip_intel" in offered[1]
 
 
 def test_run_investigation_consumes_budget_and_records(
