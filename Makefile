@@ -9,7 +9,7 @@ PYTHON ?= python3
 VENV := .venv
 DAYS ?= 30
 
-.PHONY: help install build test lint validate deploy deploy-guided delete stats preview-email clean
+.PHONY: help install build test lint validate deploy deploy-guided delete stats preview-email catalog-doc clean
 
 help:
 	@echo "ClickOps Sentinel"
@@ -23,6 +23,7 @@ help:
 	@echo "  make deploy          Deploy using saved samconfig.toml values"
 	@echo "  make stats           Print investigation statistics (DAYS=30)"
 	@echo "  make preview-email   Render the email templates to docs/email-preview.html"
+	@echo "  make catalog-doc     Regenerate docs/criticality-catalog.md from the catalog"
 	@echo "  make delete          Delete the stack"
 	@echo ""
 	@echo "  Variables: STACK_NAME=$(STACK_NAME) REGION=$(REGION)"
@@ -57,6 +58,9 @@ stats:
 
 preview-email:
 	$(PYTHON) scripts/render_email.py
+
+catalog-doc:
+	$(PYTHON) scripts/render_catalog.py
 
 delete:
 	sam delete --stack-name $(STACK_NAME) --region $(REGION)

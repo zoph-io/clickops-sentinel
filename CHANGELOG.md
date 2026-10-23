@@ -5,6 +5,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Criticality scale (none, low, medium, high, critical) and a deterministic
+  catalog of risky AWS actions mapped to MITRE ATT&CK and Stratus Red Team,
+  published in `docs/criticality-catalog.md` (`make catalog-doc`). Parameter
+  checks raise the level for public exposure, admin grants, cross-account
+  trust, and similar requests; root and self-targeting changes are rated at
+  least high; failed calls are lowered one level. The rating is a floor
+  under the agent's security severity, appears on every alert (including the
+  plain path), prefixes high and critical subjects and chat titles, and
+  critical changes bypass the session cooldown. New `CriticalityOverrides`
+  parameter.
+- Source IP enrichment through ipinfo.io: network owner, AS number,
+  approximate location, and VPN, proxy, Tor, or hosting flags on alerts,
+  sign-in alerts, and as a `lookup_ip_intel` agent tool. New
+  `IpLookupProvider` (`ipinfo` or `none`) and `IpLookupTokenParam`
+  parameters.
+- `make stats` breaks investigations down by catalog rule, source country,
+  and source network.
+
 ### Changed
 
 - Rewrote the README around the value proposition, with a "Try it" path

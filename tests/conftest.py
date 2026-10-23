@@ -64,6 +64,10 @@ def base_env(monkeypatch):
         "MAX_INVESTIGATION_TOKENS": "60000",
         "MEMORY_RETENTION_DAYS": "180",
         "METRICS_NAMESPACE": "ClickOpsSentinel",
+        # Tests never reach the network; enrichment is exercised with fakes.
+        "IP_LOOKUP_PROVIDER": "none",
+        "CRITICALITY_OVERRIDES": "",
+        "STACK_NAME": "clickops-sentinel",
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)

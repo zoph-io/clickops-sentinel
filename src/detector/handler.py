@@ -15,9 +15,11 @@ import time
 import boto3
 from botocore.exceptions import ClientError
 
+import criticality
 import email_render
 import email_send
 import identity as identity_mod
+import ip_intel
 import notify
 import suppressed_actions as sup
 
@@ -147,27 +149,32 @@ def _publish_chat(alert: dict, thread_id: str) -> None:
     )
 
 
-def publish_plain(record: dict, who: str, session_id: str) -> None:
+def publish_plain(
+    record: dict, who: str, session_id: str, rating: dict | None, ip_info: dict | None
+) -> None:
     account_label = get_account_label(record)
-    alert = notify.build_plain_alert(record, who, account_label)
+    alert = notify.build_plain_alert(record, who, account_label, rating, ip_info)
     _publish_chat(alert, session_id)
-    email = email_render.plain_email(record, who, account_label)
+    email = email_render.plain_email(record, who, account_label, "", rating, ip_info)
     email_send.send_email(email["subject"], email["html"], alert["text"])
 
 
-def publish_followup(record: dict, who: str, session_id: str) -> None:
-    alert = notify.build_followup_note(record, who)
+def publish_followup(record: dict, who: str, session_id: str, rating: dict | None) -> None:
+    alert = notify.build_followup_note(record, who, rating)
     _publish_chat(alert, session_id)
     email = email_render.note_email(alert["title"], alert["text"])
     email_send.send_email(email["subject"], email["html"], alert["text"])
 
 
-def invoke_investigator(record: dict, who: dict, account_label: str, session_id: str) -> None:
+def invoke_investigator(
+    record: dict, who: dict, account_label: str, session_id: str, ip_info: dict | None
+) -> None:
     payload = {
         "record": record,
         "identity": who,
         "account_label": account_label,
         "session_id": session_id,
+        "ip_info": ip_info,
     }
     _client("lambda").invoke(
         FunctionName=os.environ["INVESTIGATOR_FUNCTION_NAME"],
@@ -197,23 +204,41 @@ def handle_console_action(record: dict) -> dict:
     who = identity_mod.extract_identity(record)
     session_id = extract_session_id(record)
     account_label = get_account_label(record)
+    rating = criticality.classify(record)
+    level = criticality.level_of(rating)
 
     ai_enabled = os.environ.get("ENABLE_AI") == "true"
-    if ai_enabled:
-        if session_cooldown_active(session_id):
-            publish_followup(record, who["display"], session_id)
-            log_decision(event_id, "followup", eventName=event_name, session=session_id)
+    cooldown_bypassed = False
+    if ai_enabled and session_cooldown_active(session_id):
+        if not criticality.bypasses_cooldown(rating):
+            publish_followup(record, who["display"], session_id, rating)
+            log_decision(
+                event_id, "followup", eventName=event_name, session=session_id, criticality=level
+            )
             return {"decision": "followup"}
+        cooldown_bypassed = True
+
+    ip_info = ip_intel.lookup(record.get("sourceIPAddress"))
+    if ai_enabled:
         try:
-            invoke_investigator(record, who, account_label, session_id)
-            log_decision(event_id, "investigating", eventName=event_name, actor=who["actor_id"])
+            invoke_investigator(record, who, account_label, session_id, ip_info)
+            log_decision(
+                event_id,
+                "investigating",
+                eventName=event_name,
+                actor=who["actor_id"],
+                criticality=level,
+                cooldown_bypassed=cooldown_bypassed,
+            )
             return {"decision": "investigating"}
         except ClientError as error:
             # Never drop an alert: fall back to the plain path.
             logger.error("investigator invoke failed: %s", error)
 
-    publish_plain(record, who["display"], session_id)
-    log_decision(event_id, "notified", eventName=event_name, actor=who["actor_id"])
+    publish_plain(record, who["display"], session_id, rating, ip_info)
+    log_decision(
+        event_id, "notified", eventName=event_name, actor=who["actor_id"], criticality=level
+    )
     return {"decision": "notified"}
 
 
@@ -244,9 +269,10 @@ def handle_console_login(record: dict) -> dict:
     who = identity_mod.extract_identity(record)
     account_label = get_account_label(record)
     reason = ", ".join(reasons)
-    alert = notify.build_login_alert(record, who["display"], account_label, reason)
+    ip_info = ip_intel.lookup(record.get("sourceIPAddress"))
+    alert = notify.build_login_alert(record, who["display"], account_label, reason, ip_info)
     _publish_chat(alert, f"signin-{event_id}")
-    email = email_render.login_email(record, who["display"], account_label, reason)
+    email = email_render.login_email(record, who["display"], account_label, reason, ip_info)
     email_send.send_email(email["subject"], email["html"], alert["text"])
     log_decision(event_id, "login-alert", reasons=reasons)
     return {"decision": "login-alert"}

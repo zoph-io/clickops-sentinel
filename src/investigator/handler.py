@@ -18,8 +18,10 @@ import boto3
 
 import agent_loop
 import budget
+import criticality
 import email_render
 import email_send
+import ip_intel
 import memory
 import messages
 import tools
@@ -29,7 +31,11 @@ logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 _clients: dict = {}
 
-SYSTEM_PROMPT = """\
+_SCALE_LINES = "\n".join(
+    f"   - {level}: {criticality.SCALE[level]}" for level in reversed(criticality.LEVELS)
+)
+
+SYSTEM_PROMPT = f"""\
 You are an AWS security and cloud cost analyst embedded in ClickOps Sentinel,
 a tool that alerts an account owner when someone changes infrastructure
 manually through the AWS Console instead of infrastructure as code.
@@ -49,14 +55,28 @@ evidence-based judgment. Think about:
    policies, access keys, trust policy edits), public exposure (security
    groups open to 0.0.0.0/0, S3 public access, resource policies), weakened
    defenses (encryption or logging disabled, GuardDuty, CloudTrail, Config
-   changes, MFA removal), and secrets handling.
-4. FinOps implications: instance or cluster launches (type and count from
+   changes, MFA removal), and secrets handling. Rate security_severity on
+   this scale:
+{_SCALE_LINES}
+   The event comes pre-rated by the ClickOps Sentinel criticality catalog, a
+   deterministic referential mapped to MITRE ATT&CK and Stratus Red Team.
+   That rating is a floor applied after you answer, so never argue it down:
+   raise it when context warrants (several risky actions chained in one
+   session, an unfamiliar network or country for this actor, a VPN, proxy,
+   Tor, or hosting source). Express legitimacy through the verdict instead.
+   Session events carry their own catalog rating in the criticality field.
+4. Source network: the source IP comes with its network owner and
+   approximate location when available. A change of country or network
+   within the session or against the actor's history raises suspicion.
+   Use lookup_ip_intel, when offered, for other IPs you see in the session.
+5. FinOps implications: instance or cluster launches (type and count from
    request parameters), provisioned capacity, perpetual-billing resources
    (NAT gateways, load balancers, elastic IPs, VPC endpoints), storage
    growth. Estimate a rough monthly dollar range when the parameters allow.
    Terminating or downsizing resources is a saving, report it positively.
-5. History: use get_actor_memory to check whether this actor has prior
-   verdicts or known patterns.
+6. History: use get_actor_memory to check whether this actor has prior
+   verdicts or known patterns, including the networks and countries they
+   usually work from.
 
 Be economical with tools: each investigation has a strict token budget.
 Usually one session retrace and one memory lookup suffice. When you have
@@ -137,6 +157,24 @@ TOOL_SPECS = [
     },
 ]
 
+IP_TOOL_SPEC = {
+    "toolSpec": {
+        "name": "lookup_ip_intel",
+        "description": (
+            "Resolve a public IP address to its network owner (ASN, ISP), "
+            "approximate location, and VPN, proxy, Tor, or hosting flags when "
+            "the provider reports them."
+        ),
+        "inputSchema": {
+            "json": {
+                "type": "object",
+                "properties": {"ip": {"type": "string"}},
+                "required": ["ip"],
+            }
+        },
+    }
+}
+
 
 def _client(name: str):
     if name not in _clients:
@@ -199,49 +237,85 @@ def _publish_metrics(usage: dict, budget_used_percent: float) -> None:
 
 
 def _write_investigation_record(
-    record: dict, identity: dict, verdict: dict, usage: dict
+    record: dict,
+    identity: dict,
+    verdict: dict,
+    usage: dict,
+    rating: dict | None,
+    ip_info: dict | None,
 ) -> None:
     retention_days = int(os.environ.get("MEMORY_RETENTION_DAYS", "180"))
     now = datetime.now(UTC)
     event_id = record.get("eventID", "unknown")
+    item = {
+        "pk": {"S": "INVESTIGATION"},
+        "sk": {"S": f"{now.isoformat()}#{event_id}"},
+        "actor": {"S": identity.get("actor_id", "unknown")},
+        "event_name": {"S": record.get("eventName", "")},
+        "event_source": {"S": record.get("eventSource", "")},
+        "region": {"S": record.get("awsRegion", "")},
+        "verdict": {"S": verdict.get("verdict", "unknown")},
+        "purpose": {"S": verdict.get("purpose", "")[:500]},
+        "security_severity": {"S": verdict.get("security_severity", "none")},
+        "cost_impact": {"S": verdict.get("cost_impact", "negligible")},
+        "tokens_used": {"N": str(usage["inputTokens"] + usage["outputTokens"])},
+        "ttl": {"N": str(int(time.time()) + retention_days * 24 * 3600)},
+    }
+    if rating:
+        item["criticality_rule"] = {"S": rating["rule_id"]}
+    if ip_info and ip_info.get("country"):
+        item["source_country"] = {"S": ip_info["country"]}
+    if ip_intel.network(ip_info):
+        item["source_network"] = {"S": ip_intel.network(ip_info)[:200]}
     try:
-        _client("dynamodb").put_item(
-            TableName=os.environ["TABLE_NAME"],
-            Item={
-                "pk": {"S": "INVESTIGATION"},
-                "sk": {"S": f"{now.isoformat()}#{event_id}"},
-                "actor": {"S": identity.get("actor_id", "unknown")},
-                "event_name": {"S": record.get("eventName", "")},
-                "event_source": {"S": record.get("eventSource", "")},
-                "region": {"S": record.get("awsRegion", "")},
-                "verdict": {"S": verdict.get("verdict", "unknown")},
-                "purpose": {"S": verdict.get("purpose", "")[:500]},
-                "security_severity": {"S": verdict.get("security_severity", "none")},
-                "cost_impact": {"S": verdict.get("cost_impact", "negligible")},
-                "tokens_used": {"N": str(usage["inputTokens"] + usage["outputTokens"])},
-                "ttl": {"N": str(int(time.time()) + retention_days * 24 * 3600)},
-            },
-        )
+        _client("dynamodb").put_item(TableName=os.environ["TABLE_NAME"], Item=item)
     except Exception as error:  # noqa: BLE001 statistics are best-effort
         logger.warning("investigation record write failed: %s", error)
 
 
-def _build_user_prompt(record: dict, identity: dict, account_label: str) -> str:
+def _build_user_prompt(
+    record: dict,
+    identity: dict,
+    account_label: str,
+    rating: dict | None,
+    ip_info: dict | None,
+) -> str:
     lookback = int(os.environ.get("LOOKBACK_HOURS", "6"))
     event_summary = tools.summarize_cloudtrail_event(record)
+    if rating:
+        catalog = json.dumps(rating)
+    else:
+        catalog = "no catalog match, rate it from the scale"
     return (
         "Investigate this manual console change.\n\n"
         f"Event: {json.dumps(event_summary, default=str)}\n"
         f"Actor: {identity.get('display')} (id {identity.get('actor_id')}, "
         f"type {identity.get('kind')})\n"
         f"Account: {account_label}\n"
+        f"Criticality catalog: {catalog}\n"
+        f"Source network: {ip_intel.describe(ip_info) or 'unavailable'}\n"
         f"Suggested lookback window: {lookback} hours.\n"
         f"Session access key for retrace: {event_summary.get('accessKeyId') or 'unknown'}"
     )
 
 
+def apply_catalog_floor(verdict: dict, rating: dict | None) -> dict:
+    """Raise the agent's severity to the catalog floor, keeping its own rating."""
+    agent_severity = verdict.get("security_severity", "none")
+    final = criticality.apply_floor(agent_severity, rating)
+    if final != agent_severity:
+        verdict["agent_security_severity"] = agent_severity
+        verdict["security_severity"] = final
+    return verdict
+
+
 def run_investigation(
-    record: dict, identity: dict, account_label: str, session_id: str
+    record: dict,
+    identity: dict,
+    account_label: str,
+    session_id: str,
+    rating: dict | None = None,
+    ip_info: dict | None = None,
 ) -> dict | None:
     """Run the agent, returns the verdict or None when it could not conclude."""
     memory_id = os.environ.get("MEMORY_ID", "")
@@ -262,18 +336,33 @@ def run_investigation(
             _client("bedrock-agentcore"), memory_id, identity["actor_id"], query
         )
 
+    def tool_ip_intel(ip: str) -> str:
+        info = ip_intel.lookup(ip)
+        if info is None:
+            return json.dumps({"ip": ip, "error": "not a public IP, or lookup unavailable"})
+        return json.dumps(info)
+
+    tool_specs = list(TOOL_SPECS)
+    tool_dispatch = {
+        "lookup_events_by_user": tool_lookup_user,
+        "lookup_events_by_ip": tool_lookup_ip,
+        "get_event_details": tool_event_details,
+        "get_actor_memory": tool_actor_memory,
+    }
+    if ip_intel.enabled():
+        tool_specs.append(IP_TOOL_SPEC)
+        tool_dispatch["lookup_ip_intel"] = tool_ip_intel
+
+    if rating is None:
+        rating = criticality.classify(record)
+
     verdict, usage = agent_loop.run_agent(
         bedrock_client=_client("bedrock-runtime"),
         model_id=os.environ["MODEL_ID"],
         system_prompt=SYSTEM_PROMPT,
-        user_prompt=_build_user_prompt(record, identity, account_label),
-        tool_specs=TOOL_SPECS,
-        tool_dispatch={
-            "lookup_events_by_user": tool_lookup_user,
-            "lookup_events_by_ip": tool_lookup_ip,
-            "get_event_details": tool_event_details,
-            "get_actor_memory": tool_actor_memory,
-        },
+        user_prompt=_build_user_prompt(record, identity, account_label, rating, ip_info),
+        tool_specs=tool_specs,
+        tool_dispatch=tool_dispatch,
         max_turns=int(os.environ.get("MAX_AGENT_TURNS", "8")),
         max_total_tokens=int(os.environ.get("MAX_INVESTIGATION_TOKENS", "60000")),
     )
@@ -288,7 +377,9 @@ def run_investigation(
     if verdict is None:
         return None
 
-    _write_investigation_record(record, identity, verdict, usage)
+    verdict = apply_catalog_floor(verdict, rating)
+    _write_investigation_record(record, identity, verdict, usage, rating, ip_info)
+    source = ip_intel.describe(ip_info)
     memory.save_investigation(
         memory_client=_client("bedrock-agentcore"),
         memory_id=memory_id,
@@ -298,6 +389,8 @@ def run_investigation(
             f"Console change by {identity.get('display')}: "
             f"{record.get('eventSource')}:{record.get('eventName')} "
             f"in {record.get('awsRegion')} at {record.get('eventTime')}"
+            + (f" from {record.get('sourceIPAddress')} ({source})" if source else "")
+            + (f". Catalog rule {rating['rule_id']} ({rating['level']})" if rating else "")
         ),
         verdict_summary=(
             f"Verdict {verdict.get('verdict')} (confidence {verdict.get('confidence')}). "
@@ -320,6 +413,21 @@ def lambda_handler(event: dict, context) -> dict:
     account_label = event.get("account_label", "unknown")
     session_id = event.get("session_id", "unknown-session")
     event_id = record.get("eventID", "unknown")
+    rating = criticality.classify(record)
+    # The detector looks the IP up once; payloads from older detectors lack the key.
+    if "ip_info" in event:
+        ip_info = event["ip_info"]
+    else:
+        ip_info = ip_intel.lookup(record.get("sourceIPAddress"))
+    who = identity["display"]
+
+    def publish_plain(note: str) -> None:
+        alert = messages.build_plain_alert(record, who, account_label, note, rating, ip_info)
+        _publish(alert, session_id)
+        _send_email(
+            email_render.plain_email(record, who, account_label, note, rating, ip_info),
+            alert["text"],
+        )
 
     # Budget pre-check: skip the AI path entirely when today's budget is gone.
     daily_budget = int(os.environ.get("DAILY_TOKEN_BUDGET", "2000000"))
@@ -330,13 +438,7 @@ def lambda_handler(event: dict, context) -> dict:
         used = 0
 
     if used >= daily_budget:
-        note = "AI investigation skipped: daily token budget exhausted."
-        alert = messages.build_plain_alert(record, identity["display"], account_label, note)
-        _publish(alert, session_id)
-        _send_email(
-            email_render.plain_email(record, identity["display"], account_label, note),
-            alert["text"],
-        )
+        publish_plain("AI investigation skipped: daily token budget exhausted.")
         try:
             if budget.try_claim_exhaustion_notice(_client("dynamodb"), os.environ["TABLE_NAME"]):
                 notice_text = (
@@ -367,31 +469,25 @@ def lambda_handler(event: dict, context) -> dict:
         return {"decision": "budget-exhausted"}
 
     try:
-        verdict = run_investigation(record, identity, account_label, session_id)
+        verdict = run_investigation(
+            record, identity, account_label, session_id, rating, ip_info
+        )
     except Exception as error:  # noqa: BLE001 never drop an alert
         logger.error("investigation failed: %s", error)
         verdict = None
 
     if verdict is None:
-        note = "AI investigation unavailable, plain alert."
-        alert = messages.build_plain_alert(
-            record, identity["display"], account_label, note
-        )
-        _publish(alert, session_id)
-        _send_email(
-            email_render.plain_email(record, identity["display"], account_label, note),
-            alert["text"],
-        )
-        log_decision(event_id, "notified-plain")
+        publish_plain("AI investigation unavailable, plain alert.")
+        log_decision(event_id, "notified-plain", criticality=criticality.level_of(rating))
         return {"decision": "notified-plain"}
 
-    alert = messages.build_enriched_alert(record, identity["display"], account_label, verdict)
+    alert = messages.build_enriched_alert(record, who, account_label, verdict, rating, ip_info)
     _publish(alert, session_id)
     if email_send.email_enabled():
         steps = _session_steps(record, session_id)
         _send_email(
             email_render.enriched_email(
-                record, identity["display"], account_label, verdict, steps
+                record, who, account_label, verdict, steps, rating, ip_info
             ),
             alert["text"],
         )
@@ -400,6 +496,7 @@ def lambda_handler(event: dict, context) -> dict:
         "notified-enriched",
         verdict=verdict.get("verdict"),
         security=verdict.get("security_severity"),
+        criticality_rule=rating["rule_id"] if rating else "",
         cost=verdict.get("cost_impact"),
     )
     return {"decision": "notified-enriched", "verdict": verdict.get("verdict")}

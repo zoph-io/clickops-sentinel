@@ -10,6 +10,8 @@ import json
 import time
 from datetime import UTC, datetime, timedelta
 
+import criticality
+
 MAX_PAGES = 3
 PAGE_SIZE = 50
 THROTTLE_SECONDS = 0.55
@@ -38,6 +40,10 @@ def summarize_cloudtrail_event(raw_event: dict) -> dict:
     }
     if raw_event.get("errorCode"):
         summary["errorCode"] = raw_event["errorCode"]
+    rating = criticality.classify(raw_event)
+    if rating:
+        summary["criticality"] = rating["level"]
+        summary["rule"] = rating["rule_id"]
     params = raw_event.get("requestParameters")
     if params:
         summary["requestParameters"] = _truncate(

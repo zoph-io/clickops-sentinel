@@ -7,6 +7,9 @@ The plain variants are the fallback when investigation is unavailable.
 
 import json
 
+import criticality
+import ip_intel
+
 SEVERITY_LABELS = {
     "none": "none",
     "low": "LOW",
@@ -49,7 +52,7 @@ def build_qdev_payload(
     return json.dumps(payload)
 
 
-def _base_fields(record: dict, who: str, account_label: str) -> list:
+def _base_fields(record: dict, who: str, account_label: str, ip_info: dict | None) -> list:
     event_name = record.get("eventName", "UnknownEvent")
     event_source = record.get("eventSource", "unknown")
     region = record.get("awsRegion", "us-east-1")
@@ -61,12 +64,21 @@ def _base_fields(record: dict, who: str, account_label: str) -> list:
         ("Time", record.get("eventTime", "")),
         ("Source IP", record.get("sourceIPAddress", "unknown")),
     ]
+    if ip_info:
+        fields.append(("Source network", ip_intel.describe(ip_info)))
     if record.get("errorCode"):
         fields.append(("Result", f"failed ({record['errorCode']})"))
     return fields
 
 
-def build_enriched_alert(record: dict, who: str, account_label: str, verdict: dict) -> dict:
+def build_enriched_alert(
+    record: dict,
+    who: str,
+    account_label: str,
+    verdict: dict,
+    rating: dict | None = None,
+    ip_info: dict | None = None,
+) -> dict:
     """Alert built from the agent's structured verdict."""
     event_name = record.get("eventName", "UnknownEvent")
     region = record.get("awsRegion", "us-east-1")
@@ -75,7 +87,7 @@ def build_enriched_alert(record: dict, who: str, account_label: str, verdict: di
 
     severity = verdict.get("security_severity", "none")
     cost = verdict.get("cost_impact", "negligible")
-    title = f"ClickOps detected: {event_name}"
+    title = f"{criticality.title_prefix(severity)}ClickOps detected: {event_name}"
 
     markdown_lines = [
         f"*Purpose*: {verdict.get('purpose', 'unknown')}",
@@ -83,9 +95,11 @@ def build_enriched_alert(record: dict, who: str, account_label: str, verdict: di
         f"(confidence {verdict.get('confidence', 'unknown')})",
         f"*Security*: {SEVERITY_LABELS.get(severity, severity)}. "
         f"{verdict.get('security_analysis', '')}",
-        f"*Cost*: {cost}. {verdict.get('cost_analysis', '')}",
     ]
-    for label, value in _base_fields(record, who, account_label):
+    if rating:
+        markdown_lines.append(f"*Catalog*: {criticality.describe(rating, with_level=False)}")
+    markdown_lines.append(f"*Cost*: {cost}. {verdict.get('cost_analysis', '')}")
+    for label, value in _base_fields(record, who, account_label, ip_info):
         markdown_lines.append(f"*{label}*: {value}")
     markdown_lines.append(f"*Session*: {verdict.get('session_narrative', '')}")
     history = verdict.get("history_context", "")
@@ -101,16 +115,28 @@ def build_enriched_alert(record: dict, who: str, account_label: str, verdict: di
     return {"title": title, "markdown": markdown, "text": text}
 
 
-def build_plain_alert(record: dict, who: str, account_label: str, note: str = "") -> dict:
+def build_plain_alert(
+    record: dict,
+    who: str,
+    account_label: str,
+    note: str = "",
+    rating: dict | None = None,
+    ip_info: dict | None = None,
+) -> dict:
     """Fallback alert without agent-derived sections."""
     event_name = record.get("eventName", "UnknownEvent")
     region = record.get("awsRegion", "us-east-1")
     event_id = record.get("eventID", "")
     link = cloudtrail_console_link(region, event_id)
 
-    title = f"ClickOps detected: {event_name}"
-    markdown_lines = [
-        f"*{label}*: {value}" for label, value in _base_fields(record, who, account_label)
+    level = criticality.level_of(rating)
+    title = f"{criticality.title_prefix(level)}ClickOps detected: {event_name}"
+    markdown_lines = []
+    if rating:
+        markdown_lines.append(f"*Criticality*: {criticality.describe(rating)}")
+    markdown_lines += [
+        f"*{label}*: {value}"
+        for label, value in _base_fields(record, who, account_label, ip_info)
     ]
     if note:
         markdown_lines.append(f"_{note}_")

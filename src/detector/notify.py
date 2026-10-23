@@ -7,6 +7,9 @@ render natively in Slack and Microsoft Teams. Email messages are plain text.
 
 import json
 
+import criticality
+import ip_intel
+
 
 def cloudtrail_console_link(region: str, event_id: str) -> str:
     return (
@@ -53,7 +56,13 @@ def summarize_request_parameters(record: dict, limit: int = 400) -> str:
     return text
 
 
-def build_plain_alert(record: dict, who: str, account_label: str) -> dict:
+def build_plain_alert(
+    record: dict,
+    who: str,
+    account_label: str,
+    rating: dict | None = None,
+    ip_info: dict | None = None,
+) -> dict:
     """Build title, markdown, and plain-text bodies for a detection alert."""
     event_name = record.get("eventName", "UnknownEvent")
     event_source = record.get("eventSource", "unknown")
@@ -64,9 +73,14 @@ def build_plain_alert(record: dict, who: str, account_label: str) -> dict:
     error_code = record.get("errorCode")
     link = cloudtrail_console_link(region, event_id)
     params = summarize_request_parameters(record)
+    source_network = ip_intel.describe(ip_info)
 
-    title = f"ClickOps detected: {event_name}"
-    lines = [
+    level = criticality.level_of(rating)
+    title = f"{criticality.title_prefix(level)}ClickOps detected: {event_name}"
+    lines = []
+    if rating:
+        lines.append(f"*Criticality*: {criticality.describe(rating)}")
+    lines += [
         f"*Who*: {who}",
         f"*Action*: {event_source}:{event_name}",
         f"*Account*: {account_label}",
@@ -74,6 +88,8 @@ def build_plain_alert(record: dict, who: str, account_label: str) -> dict:
         f"*Time*: {event_time}",
         f"*Source IP*: {source_ip}",
     ]
+    if source_network:
+        lines.append(f"*Source network*: {source_network}")
     if error_code:
         lines.append(f"*Result*: failed ({error_code})")
     if params:
@@ -81,8 +97,10 @@ def build_plain_alert(record: dict, who: str, account_label: str) -> dict:
     lines.append(f"<{link}|View event in CloudTrail>")
     markdown = "\n".join(lines)
 
-    text_lines = [
-        title,
+    text_lines = [title]
+    if rating:
+        text_lines.append(f"Criticality: {criticality.describe(rating)}")
+    text_lines += [
         f"Who: {who}",
         f"Action: {event_source}:{event_name}",
         f"Account: {account_label}",
@@ -90,6 +108,8 @@ def build_plain_alert(record: dict, who: str, account_label: str) -> dict:
         f"Time: {event_time}",
         f"Source IP: {source_ip}",
     ]
+    if source_network:
+        text_lines.append(f"Source network: {source_network}")
     if error_code:
         text_lines.append(f"Result: failed ({error_code})")
     if params:
@@ -100,13 +120,16 @@ def build_plain_alert(record: dict, who: str, account_label: str) -> dict:
     return {"title": title, "markdown": markdown, "text": plain_text}
 
 
-def build_login_alert(record: dict, who: str, account_label: str, reason: str) -> dict:
+def build_login_alert(
+    record: dict, who: str, account_label: str, reason: str, ip_info: dict | None = None
+) -> dict:
     """Build bodies for a console sign-in alert."""
     region = record.get("awsRegion", "us-east-1")
     event_time = record.get("eventTime", "")
     source_ip = record.get("sourceIPAddress", "unknown")
     outcome = (record.get("responseElements") or {}).get("ConsoleLogin", "Unknown")
     mfa = (record.get("additionalEventData") or {}).get("MFAUsed", "Unknown")
+    source_network = ip_intel.describe(ip_info)
 
     title = f"Console sign-in alert: {reason}"
     lines = [
@@ -118,24 +141,33 @@ def build_login_alert(record: dict, who: str, account_label: str, reason: str) -
         f"*Time*: {event_time}",
         f"*Source IP*: {source_ip}",
     ]
+    if source_network:
+        lines.append(f"*Source network*: {source_network}")
     markdown = "\n".join(lines)
     plain_text = title + "\n" + markdown.replace("*", "")
     return {"title": title, "markdown": markdown, "text": plain_text}
 
 
-def build_followup_note(record: dict, who: str) -> dict:
+def build_followup_note(record: dict, who: str, rating: dict | None = None) -> dict:
     """Short note for additional changes within an already-investigated session."""
     event_name = record.get("eventName", "UnknownEvent")
     event_source = record.get("eventSource", "unknown")
     region = record.get("awsRegion", "us-east-1")
     event_id = record.get("eventID", "")
     link = cloudtrail_console_link(region, event_id)
+    level = criticality.level_of(rating)
     title = f"Same session, additional change: {event_name}"
+    if level:
+        title += f" ({level.upper()})"
+    rating_line = f"\nCriticality: {criticality.describe(rating)}" if rating else ""
     markdown = (
         f"{who} also performed {event_source}:{event_name} "
-        f"in the session investigated above. <{link}|View event>"
+        f"in the session investigated above. <{link}|View event>{rating_line}"
     )
-    plain_text = f"{title}\n{who} also performed {event_source}:{event_name}\nEvent: {link}"
+    plain_text = (
+        f"{title}\n{who} also performed {event_source}:{event_name}"
+        f"{rating_line}\nEvent: {link}"
+    )
     return {"title": title, "markdown": markdown, "text": plain_text}
 
 
