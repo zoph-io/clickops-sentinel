@@ -1,20 +1,134 @@
 # ClickOps Sentinel
 
-[![CI](https://github.com/zoph-io/clickops-notifier/actions/workflows/ci.yml/badge.svg)](https://github.com/zoph-io/clickops-notifier/actions/workflows/ci.yml)
+[![CI](https://github.com/zoph-io/clickops-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/zoph-io/clickops-sentinel/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/)
 
-Get notified, with AI-powered context, when someone changes your AWS account
-through the AWS Console instead of infrastructure as code.
+**Know within seconds when someone changes your AWS account by hand, and
+why it matters.**
 
-ClickOps Sentinel detects mutating actions made with console session
-credentials in near real time, investigates each one with a Claude agent on
-Amazon Bedrock (what was the user trying to do, what does it mean for
-security and cost, what happened in the rest of the session), and delivers a
-reasoned alert to Slack, Microsoft Teams, or a rich HTML email with a visual
-step-by-step view of the console session.
+Someone opens the AWS Console and clicks a change into place: an SSH port
+opened to the internet, an oversized instance for a quick test, a database
+resized during an incident. Your infrastructure as code doesn't know it
+happened, and CloudTrail only records it as one line among thousands.
+
+ClickOps Sentinel catches every mutating console action in near real time,
+has a Claude agent on Amazon Bedrock investigate it, and sends you a
+reasoned alert: what the person was trying to do, what it means for security
+and cost, what else they did in the same session, and what to do next.
+
+<p align="center">
+  <img src="docs/screenshots/email-suspicious.png" width="560"
+       alt="Email alert: a security group opened SSH to 0.0.0.0/0, flagged suspicious with high security severity">
+</p>
+
+## Why teams use it
+
+- **Catch drift and risk as it happens.** Alerts arrive seconds after the
+  click, not at the next `terraform plan` or quarterly audit.
+- **Context, not just an event.** The agent retraces the whole console
+  session, checks what else came from the same IP, and remembers each
+  person's history ("first security group change by this actor in 180
+  days"). You get a verdict and a recommendation instead of raw JSON.
+- **Security and FinOps in one alert.** Each alert rates security severity
+  (privilege escalation, public exposure, weakened defenses) and cost impact
+  with a rough monthly dollar range, including savings.
+- **Hard to evade from the console.** Detection relies on a flag that AWS
+  sets server-side on console credentials, not on user-agent strings, so
+  spoofed user agents, role switching, and CloudShell are all still caught.
+- **Cheap and light.** No CloudTrail trail, no S3 log bucket, no
+  Kinesis. Two Lambdas, one DynamoDB table, and a hard daily Bedrock
+  token budget. At typical volumes it costs well under one dollar per day.
+- **Alerts always go out.** If Bedrock is down or the budget is spent, you
+  still get a plain alert.
+- **Open source**, Apache-2.0, deployed into your own account with AWS SAM.
+
+## See it in action
+
+The screenshots below are mock alerts rendered from the project's real email
+and chat templates with sample data (`make preview-email` renders the email
+templates locally).
+
+**Not every alert is bad news.** The agent tells routine, sanctioned work
+apart from real problems, and flags the money in both directions:
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/email-savings.png"
+           alt="Likely sanctioned activity: an RDS instance right-sized, cost impact savings">
+      <p align="center"><sub>Sanctioned right-sizing, flagged as savings, with a reminder to update Terraform</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/email-cost.png"
+           alt="Manual change confirmed: an m5.4xlarge launched, significant cost impact">
+      <p align="center"><sub>Ad hoc m5.4xlarge launch, flagged as a significant cost impact</sub></p>
+    </td>
+  </tr>
+</table>
+
+**Slack and Microsoft Teams**, through Amazon Q Developer in chat
+applications. Later changes from the same console session are threaded under
+the first alert, so one session doesn't flood the channel:
+
+<p align="center">
+  <img src="docs/screenshots/slack.png" width="680"
+       alt="Slack message from Amazon Q Developer with the investigation, and a threaded follow-up for CreateAccessKey">
+</p>
+
+**Console sign-in alerts** for root sign-ins, sign-ins without MFA, and
+failed sign-ins:
+
+<p align="center">
+  <img src="docs/screenshots/email-login.png" width="560" alt="Root sign-in alert email">
+</p>
+
+**An audit trail of manual changes.** Every investigation is recorded, so
+you can see who works in the console, on which services, and how risky those
+changes are:
+
+<p align="center">
+  <img src="docs/screenshots/stats.png" width="520" alt="make stats output: investigations by actor, verdict, severity, cost impact, and service">
+</p>
+
+## Try it
+
+You need an AWS account with the AWS SAM CLI, Python 3.13, and Bedrock
+access to Anthropic Claude Sonnet 4.6, plus an API key from a supported
+email provider (Resend by default). See [Prerequisites](#prerequisites) for
+details.
+
+```bash
+git clone https://github.com/zoph-io/clickops-sentinel.git
+cd clickops-sentinel
+aws ssm put-parameter --name /clickops-sentinel/email-api-key \
+  --type SecureString --value "re_your_api_key"
+make install
+make deploy-guided   # set NotificationEmail and EmailFrom, accept the other defaults
+```
+
+Then make a harmless change in the AWS Console, in the region you deployed
+to, for example adding a tag to an SNS topic. A rich email alert should
+arrive within a minute or two. To post to Slack or Teams instead of, or as
+well as, email, see [Slack and Microsoft Teams setup](#slack-and-microsoft-teams-setup).
 
 ## How it works
+
+1. **Detect.** CloudTrail emits every management write event to the
+   EventBridge default bus, free of charge. A rule matches events where
+   `sessionCredentialFromConsole` is true and `readOnly` is false, which
+   means a mutating action made with console credentials.
+2. **Filter.** The detector Lambda drops known console noise, deduplicates
+   (EventBridge delivers at least once), and starts at most one
+   investigation per console session every 30 minutes.
+3. **Investigate.** The investigator Lambda runs a small Claude agent loop
+   on the Bedrock Converse API. Using read-only tools, it replays the session
+   from CloudTrail Event History, looks at adjacent activity from the same
+   IP, and reads its long-term memory of the actor from Amazon Bedrock
+   AgentCore Memory.
+4. **Notify.** The structured verdict becomes a Slack or Teams message and a
+   rich HTML email. The investigation is saved to DynamoDB and to memory,
+   which shapes the next verdict about the same person.
 
 ```mermaid
 flowchart LR
@@ -39,6 +153,8 @@ credentials. There is no user-agent guessing, no CloudTrail trail to create,
 and no S3 log parsing: management write events arrive on the EventBridge
 default bus at no cost, in seconds.
 
+### What the agent reports
+
 Each detection is investigated by a Claude agent before you are notified.
 The agent retraces the whole console session through CloudTrail LookupEvents
 (one temporary access key equals one session), checks adjacent activity from
@@ -59,14 +175,57 @@ the same IP, consults its long-term memory about the actor, and produces:
 Delivery is guaranteed: if Bedrock is unavailable or the daily token budget
 is spent, the alert still goes out on a plain, non-AI path.
 
-## Rich email alerts
+### How ClickOps Sentinel compares
+
+| | ClickOps Sentinel | Tools that parse CloudTrail logs in S3 |
+| --- | --- | --- |
+| Infrastructure needed | Nothing beyond the stack | A trail, log bucket access, cross-account KMS decrypt |
+| Time to alert | Seconds | Minutes, after log delivery |
+| Alert content | Verdict, purpose, security, cost, session, recommendation | Event details |
+| Coverage model | One stack per region | Every region the trail covers |
+
+The trade-off is the regional deployment model, described in
+[Detection scope and trade-offs](#detection-scope-and-trade-offs). An example
+of the S3 approach is the cloudandthings/terraform-aws-clickops-notifier
+Terraform module.
+
+## Prerequisites
+
+- An AWS account with the AWS SAM CLI, Python 3.13, and GNU make installed
+  locally.
+- Bedrock model access: enable Anthropic Claude Sonnet 4.6 (or your chosen
+  model) in the Bedrock console, in the region you deploy to. Current
+  Anthropic models are invoked through cross-region inference profiles; the
+  template composes the profile ID from `BedrockGeoPrefix` and
+  `ClaudeModelId`.
+- Amazon Bedrock AgentCore Memory availability in your region (used for
+  long-term investigation memory; the stack deploys it via CloudFormation).
+- For email delivery: an account at a supported email provider and the API
+  key stored in SSM (see [Email setup](#email-setup)).
+- For Slack or Microsoft Teams delivery: a one-time workspace authorization
+  in the Amazon Q Developer console (see
+  [Slack and Microsoft Teams setup](#slack-and-microsoft-teams-setup)). Not needed for email.
+
+## Deploying
+
+The [Try it](#try-it) steps above are the whole email deployment. When
+`make deploy-guided` prompts you, set `NotificationEmail` to the recipient
+address and `EmailFrom` to your verified sender, and accept the defaults
+elsewhere. Later deployments reuse the saved answers in `samconfig.toml`:
+
+```bash
+make deploy
+```
+
+Deploy to us-east-1 at minimum, plus every region your team works in. See
+[Detection scope and trade-offs](#detection-scope-and-trade-offs) for why.
+
+## Email setup
 
 Email alerts are full HTML: verdict and confidence pills, security and cost
 cards, the agent's purpose and recommendation, and a console session path
 diagram showing every step the user took, with the alerted action
 highlighted.
-
-![Rich email alert with console session path](docs/email-mock.png)
 
 Emails are sent through an external transactional email provider, not
 Amazon SES (SES production access is deliberately out of scope). Supported
@@ -101,42 +260,6 @@ Preview the templates locally without any AWS access:
 ```bash
 make preview-email   # writes docs/email-preview.html
 ```
-
-## Prerequisites
-
-- An AWS account with the AWS SAM CLI, Python 3.13, and GNU make installed
-  locally.
-- Bedrock model access: enable Anthropic Claude Sonnet 4.6 (or your chosen
-  model) in the Bedrock console, in the region you deploy to. Current
-  Anthropic models are invoked through cross-region inference profiles; the
-  template composes the profile ID from `BedrockGeoPrefix` and
-  `ClaudeModelId`.
-- Amazon Bedrock AgentCore Memory availability in your region (used for
-  long-term investigation memory; the stack deploys it via CloudFormation).
-- For email delivery: an account at a supported email provider and the API
-  key stored in SSM (see above).
-- For Slack or Microsoft Teams delivery: a one-time workspace authorization
-  in the Amazon Q Developer console (see below). Not needed for email.
-
-## Quickstart (email)
-
-```bash
-git clone https://github.com/zoph-io/clickops-notifier.git
-cd clickops-notifier
-aws ssm put-parameter --name /clickops-sentinel/email-api-key \
-  --type SecureString --value "re_your_api_key"
-make install
-make build
-make deploy-guided
-```
-
-When prompted, set `NotificationEmail` to the recipient address and
-`EmailFrom` to your verified sender, and accept the defaults elsewhere.
-
-Smoke test: open the AWS Console and make a harmless change in the deployed
-region, for example add a tag to an SNS topic. Within a minute or two you
-should receive a rich HTML email leading with the agent's verdict and the
-session path.
 
 ## Slack and Microsoft Teams setup
 
@@ -264,12 +387,6 @@ make deploy REGION=eu-west-1
 - No historical replay: without a trail, an event missed during an outage of
   the detector is not reprocessed (the 90-day CloudTrail Event History
   remains available for manual review; the DLQ captures failed deliveries).
-
-Compared to CloudTrail-S3-parsing tools (for example the
-cloudandthings/terraform-aws-clickops-notifier Terraform module), this
-design needs no trail, no log bucket access, no cross-account KMS decrypt
-permissions, and reacts in seconds instead of minutes, at the price of the
-regional deployment model above.
 
 ## Architecture notes
 

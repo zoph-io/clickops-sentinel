@@ -3,6 +3,16 @@
 All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- Rewrote the README around the value proposition, with a "Try it" path
+  near the top and mock screenshots rendered from the real templates
+  (suspicious, savings, and cost-impact emails, a sign-in alert, a Slack
+  thread, and `make stats` output). The hand-drawn `docs/email-mock.png`
+  was replaced by these renders.
+
 ## [0.2.0] - 2026-07-12
 
 ### Changed
