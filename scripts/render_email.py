@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import sample_events  # noqa: E402
 
+import client  # noqa: E402
 import criticality  # noqa: E402
 import email_render  # noqa: E402
 
@@ -48,22 +49,30 @@ SESSION_STEPS = [
 def main() -> None:
     output = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "docs" / "email-preview.html"
 
-    record = dict(sample_events.CONSOLE_MUTATION)
+    record = dict(sample_events.BROWSER_MUTATION)
     ip_info = sample_events.IP_INFO
     steps = email_render.mark_highlighted_step(SESSION_STEPS, record)
     enriched = email_render.enriched_email(
         record, "alice@example.com", "prod (123456789012)", VERDICT, steps,
         criticality.classify(record, overrides="", stack_name=""), ip_info,
+        client.new_context(record),
     )
-    exposure = dict(sample_events.SG_OPEN_SSH)
+    # An AI agent browser opening SSH, in a session that just changed country.
+    exposure = {**sample_events.SG_OPEN_SSH, "userAgent": sample_events.CURSOR_UA}
+    context = client.new_context(exposure)
+    context["anomalies"] = ["source country changed mid-session: FR to US"]
     plain = email_render.plain_email(
         exposure, "alice@example.com", "prod (123456789012)",
         "AI investigation unavailable, plain alert.",
-        criticality.classify(exposure, overrides="", stack_name=""),
+        criticality.apply_session_anomalies(
+            criticality.classify(exposure, overrides="", stack_name=""), context["anomalies"]
+        ),
         {**ip_info, "flags": ["vpn", "hosting"]},
+        context,
     )
     login = email_render.login_email(
-        sample_events.ROOT_LOGIN, "Root user", "prod (123456789012)", "root sign-in", ip_info
+        sample_events.ROOT_LOGIN, "Root user", "prod (123456789012)", "root sign-in", ip_info,
+        client.parse(sample_events.CHROME_UA),
     )
 
     separator = '<div style="height:32px;"></div>'

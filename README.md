@@ -16,6 +16,8 @@ ClickOps Sentinel catches every mutating console action in near real time,
 has a Claude agent on Amazon Bedrock investigate it, and sends you a
 reasoned alert: what the person was trying to do, what it means for security
 and cost, what else they did in the same session, and what to do next.
+It also catches AI agents changing infrastructure outside IaC, whether they
+drive a browser in the console or call the API.
 
 <p align="center">
   <img src="docs/screenshots/email-suspicious.png" width="560"
@@ -41,9 +43,15 @@ and cost, what else they did in the same session, and what to do next.
 - **Know where the click came from.** The source IP is resolved to its
   network (ISP or hosting provider) and approximate location, with VPN,
   proxy, and Tor flags when available.
-- **Hard to evade from the console.** Detection relies on a flag that AWS
-  sets server-side on console credentials, not on user-agent strings, so
-  spoofed user agents, role switching, and CloudShell are all still caught.
+- **Catch AI agents and hijacked sessions.** Each alert says what made the
+  call: a person's browser, a browser driven by an AI agent or automation,
+  CloudShell, or a CLI labelled as an AI agent. API changes by labelled AI
+  agents are alerted like console changes, and a session that switches
+  browser or country mid-session is flagged as a likely stolen session.
+- **Hard to evade from the console.** Console detection relies on a flag
+  that AWS sets server-side on console credentials, not on user-agent
+  strings, so spoofed user agents, role switching, and CloudShell are all
+  still caught. The user agent only adds labels on top.
 - **Cheap and light.** No CloudTrail trail, no S3 log bucket, no
   Kinesis. Two Lambdas, one DynamoDB table, and a hard daily Bedrock
   token budget. At typical volumes it costs well under one dollar per day.
@@ -125,13 +133,16 @@ well as, email, see [Slack and Microsoft Teams setup](#slack-and-microsoft-teams
 1. **Detect.** CloudTrail emits every management write event to the
    EventBridge default bus, free of charge. A rule matches events where
    `sessionCredentialFromConsole` is true and `readOnly` is false, which
-   means a mutating action made with console credentials.
+   means a mutating action made with console credentials. A second rule
+   matches API write events whose user agent carries an app ID, for
+   [AI agents](#clients-and-ai-agents) that label themselves.
 2. **Filter and rate.** The detector Lambda drops known console noise,
    deduplicates (EventBridge delivers at least once), rates the change
    against the [criticality catalog](#criticality-scale-and-catalog), looks
-   up the [source IP](#source-ip-enrichment), and starts at most one
-   investigation per console session every 30 minutes. Critical changes
-   skip that cooldown.
+   up the [source IP](#source-ip-enrichment), compares the
+   [client](#clients-and-ai-agents) with the rest of the session and the
+   actor's history, and starts at most one investigation per session every
+   30 minutes. Critical changes and session anomalies skip that cooldown.
 3. **Investigate.** The investigator Lambda runs a small Claude agent loop
    on the Bedrock Converse API. Using read-only tools, it replays the session
    from CloudTrail Event History, looks at adjacent activity from the same
@@ -144,8 +155,11 @@ well as, email, see [Slack and Microsoft Teams setup](#slack-and-microsoft-teams
 ```mermaid
 flowchart LR
     Console[AWS Console action] --> CT[CloudTrail management event]
-    CT --> EB[EventBridge default bus rule]
+    Agent[AI agent API call with app ID] --> CT
+    CT --> EB[EventBridge default bus rules]
     EB -->|"sessionCredentialFromConsole=true, readOnly=false"| DET[Detector Lambda]
+    EB -->|"userAgent app/*, readOnly=false"| DET
+    DET <-->|session and actor clients| DDB[DynamoDB]
     DET -->|suppressed or duplicate| Drop[Ignore]
     DET <-->|source IP| IPI[IP lookup provider]
     DET -->|async invoke| INV[Investigator Lambda, Claude agent]
@@ -159,11 +173,12 @@ flowchart LR
     EB2[ConsoleLogin rule] --> DET
 ```
 
-Detection relies on the CloudTrail `sessionCredentialFromConsole` flag, which
-AWS sets server-side for every API call made with console session
-credentials. There is no user-agent guessing, no CloudTrail trail to create,
-and no S3 log parsing: management write events arrive on the EventBridge
-default bus at no cost, in seconds.
+Console detection relies on the CloudTrail `sessionCredentialFromConsole`
+flag, which AWS sets server-side for every API call made with console
+session credentials. The user agent is only used to label what made the
+call and to catch AI agents that identify themselves. There is no CloudTrail
+trail to create and no S3 log parsing: management write events arrive on the
+EventBridge default bus at no cost, in seconds.
 
 ### What the agent reports
 
@@ -183,6 +198,9 @@ the same IP, consults its long-term memory about the actor, and produces:
   Team reference
 - the source network and approximate location, compared with the rest of
   the session and the actor's usual networks
+- the client that made the call (browser, AI agent, automation, CloudShell),
+  whether a human appears to have directed an AI agent, and any session
+  anomaly such as a browser or country switch
 - FinOps implications with a cost impact rating and rough monthly dollar
   range: instance launches, provisioned capacity, perpetual-billing
   resources, and also savings
@@ -266,6 +284,60 @@ for mobile and corporate networks.
 
 - Source IPs are personal data in many jurisdictions. Set
   `IpLookupProvider=none` to keep them inside your account.
+
+### Clients and AI agents
+
+The CloudTrail `userAgent` tells what made each call. Alerts label it:
+
+| Client | Example user agent | Label |
+| --- | --- | --- |
+| Browser | `... Chrome/156.0.0.0 Safari/537.36` | Chrome on macOS |
+| AI agent browser | `... Cursor/3.27.6 Chrome/148... Electron/42.11.16 ...` | Cursor browser (AI agent tool) on macOS |
+| Automated browser | `... HeadlessChrome/150.0.0.0 ...`, Playwright, Puppeteer, Selenium | Headless Chrome on Linux |
+| AI agent via CLI or SDK | `aws-cli/2.38.5 ... app/cursor-agent ...` | AI agent cursor-agent via AWS CLI on macOS |
+| CloudShell, IaC, CLI, SDK | `exec-env/CloudShell`, `Terraform/1.9.8`, `aws-sam-cli/1.169.0` | CloudShell, Terraform, AWS SAM CLI |
+
+Changes by an AI agent are titled `ClickOps by an AI agent detected` (in the
+console) or `AI agent change detected` (through the API), so they are easy
+to filter and route.
+
+**AI agents through the API.** Agents usually call the AWS CLI or an SDK,
+which carries no console flag and looks exactly like a person typing. The
+AWS CLI and SDKs add the value of `AWS_SDK_UA_APP_ID` to their user agent as
+`app/<id>`, so set it in your agents' environments to make their changes
+visible:
+
+```bash
+export AWS_SDK_UA_APP_ID=claude-code    # or cursor-agent, codex, kiro, ...
+```
+
+A second EventBridge rule forwards API write events carrying an app ID, and
+the detector alerts on those matching `AgentAppIds` (by default common agent
+names such as claude, cursor, codex, copilot, kiro, and any ID containing
+`agent` or `mcp`). An AI agent changing infrastructure outside IaC is drift
+like a console click, and gets the same investigation, rating, and alert.
+An agent applying IaC (Terraform, SAM, CDK, Pulumi) is the path you want,
+so it is attributed but not alerted. Set `WatchAgentApiChanges=false` to
+watch the console only.
+
+**Session anomalies.** The detector remembers the client and source country
+of each session (one temporary access key) for 12 hours. When a session
+switches from one browser to another, or changes country, between two
+changes, the alert is raised to at least high by catalog rule SES-001 and
+investigated even inside the session cooldown: it is the signature of a
+stolen session cookie or temporary credentials replayed elsewhere. A switch
+between the browser and CloudShell or a CLI is noted without raising the
+level.
+
+**New clients.** The detector also remembers, for `MemoryRetentionDays`,
+which clients each person has used. A first change from a client never seen
+for that person (Firefox on Windows for someone who always uses Chrome on a
+Mac, or a sudden AI agent) is noted on the alert and given to the agent.
+
+Know the limits: the user agent is self-reported. An agent marker is
+evidence that an agent was involved, but an ordinary browser does not prove
+a human: an agent driving a person's own browser looks exactly like them,
+and an agent that does not set an app ID through the API is not seen.
 
 ### How ClickOps Sentinel compares
 
@@ -407,6 +479,8 @@ Changes made by one console session are grouped into the same message thread.
 | `CriticalityOverrides` | empty | Comma-separated `service:Action=level` re-ratings of the [criticality catalog](#criticality-scale-and-catalog). |
 | `IpLookupProvider` | `ipinfo` | [Source IP enrichment](#source-ip-enrichment): `ipinfo` or `none`. |
 | `IpLookupTokenParam` | empty | Optional SSM SecureString parameter holding an ipinfo.io token. |
+| `WatchAgentApiChanges` | `true` | Also alert on API changes by [AI agents](#clients-and-ai-agents) that set an app ID. |
+| `AgentAppIds` | common agent names | Comma-separated markers matched against app IDs and embedded browser apps. `*` treats every app ID as an agent. |
 | `AccountFriendlyName` | empty | Account name in alerts. Empty resolves the IAM account alias. |
 | `LambdaMemorySize` | `128` | Detector Lambda memory. |
 | `PermissionsBoundaryArn` | empty | Permissions boundary applied to all created IAM roles. |
@@ -439,8 +513,8 @@ volume at these rates fits within the free tier of every supported provider.
 ## Statistics
 
 Every investigation writes a structured record (actor, action, verdict,
-purpose, security severity, catalog rule, source country and network, cost
-impact, tokens) to DynamoDB, retained for
+purpose, security severity, catalog rule, source country and network,
+client and AI agent, cost impact, tokens) to DynamoDB, retained for
 `MemoryRetentionDays`. This is also a reviewable audit record of break-glass
 console activity that can later be codified in IaC or reverted.
 
@@ -449,8 +523,8 @@ make stats DAYS=30
 ```
 
 prints investigation counts, top actors, verdict and severity breakdowns,
-catalog rules matched, source countries and networks, cost impact
-distribution, and total token spend.
+catalog rules matched, source countries and networks, clients and AI
+agents, cost impact distribution, and total token spend.
 
 ## Detection scope and trade-offs
 
@@ -465,7 +539,9 @@ Know the limits:
 - Manual CLI and SDK actions are out of scope by design. A user running
   `aws ec2 run-instances` from a laptop is manual too, but carries no
   console flag. Catching that class requires federation conventions
-  (session names set to emails) outside this tool's scope.
+  (session names set to emails) outside this tool's scope. The exception is
+  AI agents that label themselves with an app ID (see
+  [Clients and AI agents](#clients-and-ai-agents)).
 - Data events (S3 object uploads, Lambda console test invokes, DynamoDB
   item edits) never reach the EventBridge default bus and are not detected.
 - Read-only console browsing is not alerted on.
@@ -529,6 +605,10 @@ make deploy REGION=eu-west-1
   failed`. Common causes: the event's source is not a public IP (for
   example `AWS Internal`), the provider's unauthenticated rate limit (set
   `IpLookupTokenParam`), or `IpLookupProvider=none`.
+- An AI agent's API changes are not alerted: run one of its commands with
+  `--debug` and check that the `User-Agent` header contains `app/<id>`, that
+  the ID matches a marker in `AgentAppIds`, and that `WatchAgentApiChanges`
+  is `true`. Read-only calls are never alerted.
 - A rating that does not fit your environment: re-rate the action with
   `CriticalityOverrides`, and consider opening an issue if the default is
   wrong for everyone.

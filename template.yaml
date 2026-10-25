@@ -120,6 +120,15 @@ Parameters:
     Default: ""
     AllowedPattern: "^$|^/.*"
     Description: Optional name of an SSM SecureString parameter holding an ipinfo.io token, starting with a slash (for example /clickops-sentinel/ipinfo-token). Empty uses the unauthenticated tier.
+  WatchAgentApiChanges:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Also alert on API changes (not only console) whose user agent carries an AI agent app ID, set with AWS_SDK_UA_APP_ID in the agent's environment and matched against AgentAppIds.
+  AgentAppIds:
+    Type: String
+    Default: claude,cursor,codex,copilot,kiro,amazon-q,q-cli,cline,windsurf,aider,gemini,opencode,goose,devin,agent,mcp
+    Description: Comma-separated markers identifying AI agents, matched case-insensitively as substrings of the user agent app ID (app/...) and of the app hosting an embedded console browser. Use * to treat every app ID as an AI agent.
   AccountFriendlyName:
     Type: String
     Default: ""
@@ -151,6 +160,7 @@ Conditions:
   ConsoleLoginAlertsEnabled: !Equals [!Ref EnableConsoleLoginAlerts, "true"]
   HasBoundary: !Not [!Equals [!Ref PermissionsBoundaryArn, ""]]
   HasIpLookupToken: !Not [!Equals [!Ref IpLookupTokenParam, ""]]
+  AgentApiChangesWatched: !Equals [!Ref WatchAgentApiChanges, "true"]
 
 Globals:
   Function:
@@ -163,6 +173,7 @@ Globals:
         CRITICALITY_OVERRIDES: !Ref CriticalityOverrides
         IP_LOOKUP_PROVIDER: !Ref IpLookupProvider
         IP_LOOKUP_TOKEN_PARAM: !Ref IpLookupTokenParam
+        AGENT_APP_IDS: !Ref AgentAppIds
 
 Resources:
 
@@ -260,6 +271,8 @@ Resources:
           EXTRA_SUPPRESSED_ACTIONS: !Ref ExtraSuppressedActions
           ACCOUNT_FRIENDLY_NAME: !Ref AccountFriendlyName
           SESSION_COOLDOWN_MINUTES: "30"
+          AGENT_API_CHANGES: !Ref WatchAgentApiChanges
+          CLIENT_HISTORY_DAYS: !Ref MemoryRetentionDays
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref StateTable
@@ -315,6 +328,42 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt ConsoleActionRule.Arn
+
+  # API changes by clients that label themselves with an app ID
+  # (AWS_SDK_UA_APP_ID). The detector keeps those matching AgentAppIds.
+  # CloudTrail only sets sessionCredentialFromConsole on console calls.
+  AgentApiRule:
+    Type: AWS::Events::Rule
+    Condition: AgentApiChangesWatched
+    Properties:
+      Description: Mutating CloudTrail management events from API clients carrying an app ID in their user agent.
+      State: ENABLED
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          sessionCredentialFromConsole:
+            - exists: false
+          readOnly:
+            - false
+            - "false"
+          userAgent:
+            - wildcard: "*app/*"
+          userIdentity:
+            invokedBy:
+              - exists: false
+      Targets:
+        - Id: detector
+          Arn: !GetAtt DetectorFunction.Arn
+
+  AgentApiRulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: AgentApiChangesWatched
+    Properties:
+      FunctionName: !Ref DetectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AgentApiRule.Arn
 
   ConsoleLoginRule:
     Type: AWS::Events::Rule

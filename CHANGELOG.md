@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Client classification from the CloudTrail user agent on every alert and
+  in the agent's context: browser, AI agent browser (such as Cursor's
+  built-in browser), automated browser (headless Chrome, Playwright),
+  CloudShell, IaC tools, CLI and SDK, and AI agents through the API.
+- API changes by AI agents that set `AWS_SDK_UA_APP_ID` are alerted like
+  console changes, through a second EventBridge rule. New
+  `WatchAgentApiChanges` and `AgentAppIds` parameters.
+- Session anomalies: a session that switches browser or source country
+  between two changes is raised to at least high (new catalog modifier
+  SES-001, MITRE T1550.004) and bypasses the session cooldown.
+- First change by a person from a client never seen for them is noted on
+  the alert. `make stats` breaks investigations down by client and AI agent.
 - Criticality scale (none, low, medium, high, critical) and a deterministic
   catalog of risky AWS actions mapped to MITRE ATT&CK and Stratus Red Team,
   published in `docs/criticality-catalog.md` (`make catalog-doc`). Parameter

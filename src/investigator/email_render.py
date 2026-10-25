@@ -12,6 +12,7 @@ packages each CodeUri separately. Keep both copies identical.
 
 import html
 
+import client as client_mod
 import criticality
 import ip_intel
 
@@ -148,7 +149,14 @@ def _pill(label: str, background: str, color: str) -> str:
     )
 
 
-def _who_block(who: str, source_ip: str, event_time: str, ip_info: dict | None = None) -> str:
+def _who_block(
+    who: str,
+    source_ip: str,
+    event_time: str,
+    ip_info: dict | None = None,
+    client_info: dict | None = None,
+    context: dict | None = None,
+) -> str:
     network_html = ""
     if ip_info:
         parts = [_esc(part) for part in (ip_intel.network(ip_info), ip_intel.place(ip_info))]
@@ -163,14 +171,45 @@ def _who_block(who: str, source_ip: str, event_time: str, ip_info: dict | None =
                 '<div style="color:#991b1b;font-size:11px;font-weight:700;margin-top:2px;">'
                 f"Source flagged: {_esc(flags)}</div>"
             )
+    client_html = ""
+    client_line = client_mod.describe(client_info)
+    if client_line:
+        if context and context.get("origin") == "api":
+            client_line += " (API call, not the console)"
+        color = "#92400e" if client_mod.is_automated(client_info) else MUTED
+        weight = "700" if client_mod.is_automated(client_info) else "400"
+        client_html = (
+            f'<div style="color:{color};font-size:12px;font-weight:{weight};margin-top:2px;">'
+            f"Client: {_esc(client_line)}</div>"
+        )
+    for anomaly in (context or {}).get("anomalies", []):
+        client_html += (
+            '<div style="color:#991b1b;font-size:11px;font-weight:700;margin-top:2px;">'
+            f"Session anomaly: {_esc(anomaly)}</div>"
+        )
+    for observation in (context or {}).get("observations", []):
+        client_html += (
+            '<div style="color:#92400e;font-size:11px;margin-top:2px;">'
+            f"Note: {_esc(observation)}</div>"
+        )
     return (
         '<tr><td style="padding:18px 24px 4px 24px;">'
         f'<div style="color:{DARK};font-size:14px;"><b>{_esc(who)}</b></div>'
         f'<div style="color:{FAINT};font-size:12px;font-family:monospace;'
         f'margin-top:2px;">{_esc(source_ip)} &middot; {_esc(event_time)}</div>'
-        f"{network_html}"
+        f"{network_html}{client_html}"
         "</td></tr>"
     )
+
+
+def _header_title(context: dict | None) -> str:
+    info = (context or {}).get("client")
+    console = (context or {}).get("origin", "console") == "console"
+    if client_mod.is_agent(info):
+        return "Console change by an AI agent" if console else "AI agent change detected"
+    if client_mod.is_automated(info):
+        return "Automated console change detected"
+    return "Manual console change detected"
 
 
 def _card(label: str, value: str, detail: str, background: str, color: str) -> str:
@@ -334,7 +373,7 @@ def _path_step(step: dict, is_last: bool) -> str:
     )
 
 
-def _session_path(session_steps: list) -> str:
+def _session_path(session_steps: list, label: str = "CONSOLE SESSION PATH") -> str:
     """Vertical stepper of the console session, capped at MAX_PATH_STEPS."""
     if not session_steps:
         return ""
@@ -364,7 +403,8 @@ def _session_path(session_steps: list) -> str:
     return (
         '<tr><td style="padding:16px 24px 4px 24px;">'
         f'<div style="color:{MUTED};font-size:10px;font-weight:700;'
-        'letter-spacing:.5px;margin-bottom:12px;">CONSOLE SESSION PATH</div>'
+        'letter-spacing:.5px;margin-bottom:12px;">'
+        f"{_esc(label)}</div>"
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
         + "".join(rows)
         + "</table></td></tr>"
@@ -401,6 +441,7 @@ def enriched_email(
     session_steps: list,
     rating: dict | None = None,
     ip_info: dict | None = None,
+    context: dict | None = None,
 ) -> dict:
     """Full rich email for an agent verdict: cards, session path, callout."""
     event_name = record.get("eventName", "UnknownEvent")
@@ -419,14 +460,22 @@ def enriched_email(
     if history and history.lower() == "none":
         history = ""
 
+    api_origin = (context or {}).get("origin") == "api"
     body = (
         _who_block(
-            who, record.get("sourceIPAddress", "unknown"), record.get("eventTime", ""), ip_info
+            who,
+            record.get("sourceIPAddress", "unknown"),
+            record.get("eventTime", ""),
+            ip_info,
+            (context or {}).get("client"),
+            context,
         )
         + _cards_row(record, verdict, rating)
         + _section("PURPOSE", verdict.get("purpose", ""))
         + _criticality_block(rating, verdict.get("agent_security_severity", ""))
-        + _session_path(session_steps)
+        + _session_path(
+            session_steps, "AGENT SESSION PATH" if api_origin else "CONSOLE SESSION PATH"
+        )
         + _section("SESSION", verdict.get("session_narrative", ""))
         + _section("SECURITY", verdict.get("security_analysis", ""))
         + _section("COST", verdict.get("cost_analysis", ""))
@@ -434,10 +483,10 @@ def enriched_email(
         + _recommendation(verdict.get("recommendation", ""))
         + _cta(link)
     )
-    header = _header("Manual console change detected", account_label, region, pills)
+    header = _header(_header_title(context), account_label, region, pills)
     prefix = criticality.title_prefix(verdict.get("security_severity", ""))
     return {
-        "subject": f"{prefix}ClickOps detected: {event_name}",
+        "subject": f"{prefix}{client_mod.headline(context)}: {event_name}",
         "html": _document(header, body),
     }
 
@@ -449,6 +498,7 @@ def plain_email(
     note: str = "",
     rating: dict | None = None,
     ip_info: dict | None = None,
+    context: dict | None = None,
 ) -> dict:
     """Detection email without agent-derived sections."""
     event_name = record.get("eventName", "UnknownEvent")
@@ -469,7 +519,12 @@ def plain_email(
 
     body = (
         _who_block(
-            who, record.get("sourceIPAddress", "unknown"), record.get("eventTime", ""), ip_info
+            who,
+            record.get("sourceIPAddress", "unknown"),
+            record.get("eventTime", ""),
+            ip_info,
+            (context or {}).get("client"),
+            context,
         )
         + '<tr><td style="padding:12px 18px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
@@ -487,15 +542,20 @@ def plain_email(
         + _section("NOTE", note)
         + _cta(link)
     )
-    header = _header("Manual console change detected", account_label, region, "")
+    header = _header(_header_title(context), account_label, region, "")
     return {
-        "subject": f"{criticality.title_prefix(level)}ClickOps detected: {event_name}",
+        "subject": f"{criticality.title_prefix(level)}{client_mod.headline(context)}: {event_name}",
         "html": _document(header, body),
     }
 
 
 def login_email(
-    record: dict, who: str, account_label: str, reason: str, ip_info: dict | None = None
+    record: dict,
+    who: str,
+    account_label: str,
+    reason: str,
+    ip_info: dict | None = None,
+    client_info: dict | None = None,
 ) -> dict:
     """Console sign-in alert email."""
     region = record.get("awsRegion", "us-east-1")
@@ -505,7 +565,11 @@ def login_email(
     pills = _pill(reason.upper(), "#ef4444", "#ffffff")
     body = (
         _who_block(
-            who, record.get("sourceIPAddress", "unknown"), record.get("eventTime", ""), ip_info
+            who,
+            record.get("sourceIPAddress", "unknown"),
+            record.get("eventTime", ""),
+            ip_info,
+            client_info,
         )
         + '<tr><td style="padding:12px 18px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'

@@ -10,6 +10,7 @@ import json
 import time
 from datetime import UTC, datetime, timedelta
 
+import client as client_mod
 import criticality
 
 MAX_PAGES = 3
@@ -37,6 +38,7 @@ def summarize_cloudtrail_event(raw_event: dict) -> dict:
         "ip": raw_event.get("sourceIPAddress"),
         "accessKeyId": user_identity.get("accessKeyId") or raw_event.get("accessKeyId"),
         "fromConsole": raw_event.get("sessionCredentialFromConsole"),
+        "client": client_mod.describe(client_mod.parse(raw_event.get("userAgent"))),
     }
     if raw_event.get("errorCode"):
         summary["errorCode"] = raw_event["errorCode"]

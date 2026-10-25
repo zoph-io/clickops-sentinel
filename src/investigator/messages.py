@@ -7,6 +7,7 @@ The plain variants are the fallback when investigation is unavailable.
 
 import json
 
+import client as client_mod
 import criticality
 import ip_intel
 
@@ -52,7 +53,9 @@ def build_qdev_payload(
     return json.dumps(payload)
 
 
-def _base_fields(record: dict, who: str, account_label: str, ip_info: dict | None) -> list:
+def _base_fields(
+    record: dict, who: str, account_label: str, ip_info: dict | None, context: dict | None
+) -> list:
     event_name = record.get("eventName", "UnknownEvent")
     event_source = record.get("eventSource", "unknown")
     region = record.get("awsRegion", "us-east-1")
@@ -66,6 +69,14 @@ def _base_fields(record: dict, who: str, account_label: str, ip_info: dict | Non
     ]
     if ip_info:
         fields.append(("Source network", ip_intel.describe(ip_info)))
+    if context:
+        if context.get("origin") == "api":
+            fields.append(("Origin", "API call, not the console"))
+        if client_mod.describe(context.get("client")):
+            fields.append(("Client", client_mod.describe(context.get("client"))))
+        signals = client_mod.signal_lines(context)
+        if signals:
+            fields.append(("Client signals", "; ".join(signals)))
     if record.get("errorCode"):
         fields.append(("Result", f"failed ({record['errorCode']})"))
     return fields
@@ -78,6 +89,7 @@ def build_enriched_alert(
     verdict: dict,
     rating: dict | None = None,
     ip_info: dict | None = None,
+    context: dict | None = None,
 ) -> dict:
     """Alert built from the agent's structured verdict."""
     event_name = record.get("eventName", "UnknownEvent")
@@ -87,7 +99,7 @@ def build_enriched_alert(
 
     severity = verdict.get("security_severity", "none")
     cost = verdict.get("cost_impact", "negligible")
-    title = f"{criticality.title_prefix(severity)}ClickOps detected: {event_name}"
+    title = f"{criticality.title_prefix(severity)}{client_mod.headline(context)}: {event_name}"
 
     markdown_lines = [
         f"*Purpose*: {verdict.get('purpose', 'unknown')}",
@@ -99,7 +111,7 @@ def build_enriched_alert(
     if rating:
         markdown_lines.append(f"*Catalog*: {criticality.describe(rating, with_level=False)}")
     markdown_lines.append(f"*Cost*: {cost}. {verdict.get('cost_analysis', '')}")
-    for label, value in _base_fields(record, who, account_label, ip_info):
+    for label, value in _base_fields(record, who, account_label, ip_info, context):
         markdown_lines.append(f"*{label}*: {value}")
     markdown_lines.append(f"*Session*: {verdict.get('session_narrative', '')}")
     history = verdict.get("history_context", "")
@@ -122,6 +134,7 @@ def build_plain_alert(
     note: str = "",
     rating: dict | None = None,
     ip_info: dict | None = None,
+    context: dict | None = None,
 ) -> dict:
     """Fallback alert without agent-derived sections."""
     event_name = record.get("eventName", "UnknownEvent")
@@ -130,13 +143,13 @@ def build_plain_alert(
     link = cloudtrail_console_link(region, event_id)
 
     level = criticality.level_of(rating)
-    title = f"{criticality.title_prefix(level)}ClickOps detected: {event_name}"
+    title = f"{criticality.title_prefix(level)}{client_mod.headline(context)}: {event_name}"
     markdown_lines = []
     if rating:
         markdown_lines.append(f"*Criticality*: {criticality.describe(rating)}")
     markdown_lines += [
         f"*{label}*: {value}"
-        for label, value in _base_fields(record, who, account_label, ip_info)
+        for label, value in _base_fields(record, who, account_label, ip_info, context)
     ]
     if note:
         markdown_lines.append(f"_{note}_")

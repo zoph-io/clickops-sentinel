@@ -52,6 +52,39 @@ CLI_MUTATION = {
 }
 del CLI_MUTATION["sessionCredentialFromConsole"]
 
+# User agents recorded in CloudTrail.
+CHROME_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
+)
+CURSOR_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Cursor/3.27.6 Chrome/148.0.7778.280 Electron/42.11.16 Safari/537.36"
+)
+AGENT_CLI_UA = (
+    "aws-cli/2.38.5 md/awscrt#0.38.0 ua/2.1 os/macos#27.0.0 md/arch#arm64 "
+    "lang/python#3.15.1 m/b,n,i cfg/retry-mode#standard app/cursor-agent "
+    "md/installer#source md/prompt#off md/command#ec2.run-instances"
+)
+
+AGENT_API_MUTATION = {
+    **copy.deepcopy(CLI_MUTATION),
+    "eventID": "23232323-2323-2323-2323-232323232323",
+    "userAgent": AGENT_CLI_UA,
+}
+
+BROWSER_MUTATION = {
+    **copy.deepcopy(CONSOLE_MUTATION),
+    "eventID": "24242424-2424-2424-2424-242424242424",
+    "userAgent": CHROME_UA,
+}
+
+AGENT_BROWSER_MUTATION = {
+    **copy.deepcopy(CONSOLE_MUTATION),
+    "eventID": "25252525-2525-2525-2525-252525252525",
+    "userAgent": CURSOR_UA,
+}
+
 CONSOLE_READONLY = {
     **copy.deepcopy(CONSOLE_MUTATION),
     "eventID": "33333333-3333-3333-3333-333333333333",

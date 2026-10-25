@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SHARED = ("criticality.py", "email_render.py", "email_secret.py", "email_send.py", "ip_intel.py")
+SHARED = (
+    "client.py",
+    "criticality.py",
+    "email_render.py",
+    "email_secret.py",
+    "email_send.py",
+    "ip_intel.py",
+)
 
 
 @pytest.mark.parametrize("name", SHARED)

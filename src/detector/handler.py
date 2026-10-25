@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Detector Lambda.
 
-Receives CloudTrail management events from the EventBridge default bus,
-filters out noise, deduplicates, extracts the human identity, and either
-hands off to the investigator Lambda (AI path) or publishes a plain
-notification directly.
+Receives CloudTrail management events from the EventBridge default bus:
+console changes, and API changes by clients labelled as AI agents. Filters
+out noise, deduplicates, extracts the human identity, tracks the client per
+session and per actor, and either hands off to the investigator Lambda (AI
+path) or publishes a plain notification directly.
 """
 
 import json
@@ -15,6 +16,7 @@ import time
 import boto3
 from botocore.exceptions import ClientError
 
+import client as client_mod
 import criticality
 import email_render
 import email_send
@@ -27,6 +29,8 @@ logger = logging.getLogger()
 logger.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 DEDUP_TTL_SECONDS = 24 * 3600
+# Console sessions last at most 12 hours.
+SESSION_CLIENT_TTL_SECONDS = 12 * 3600
 
 _clients: dict = {}
 _account_alias_cache: list = []
@@ -115,7 +119,7 @@ def session_cooldown_active(session_id: str) -> bool:
 
 
 def extract_session_id(record: dict) -> str:
-    """The temporary access key identifies one console session."""
+    """The temporary access key identifies one console or agent session."""
     user_identity = record.get("userIdentity") or {}
     return (
         user_identity.get("accessKeyId")
@@ -125,11 +129,20 @@ def extract_session_id(record: dict) -> str:
     )
 
 
-def is_console_mutation(record: dict) -> tuple[bool, str]:
-    """Re-check the EventBridge rule conditions, defense in depth."""
-    from_console = record.get("sessionCredentialFromConsole")
-    if from_console not in (True, "true"):
-        return False, "not a console session"
+def is_watched_change(record: dict) -> tuple[bool, str]:
+    """Re-check the EventBridge rule conditions, defense in depth.
+
+    Watched: console changes, and API changes whose user agent carries an AI
+    agent app ID (AWS_SDK_UA_APP_ID) when agent API watching is enabled.
+    """
+    from_console = record.get("sessionCredentialFromConsole") in (True, "true")
+    agent_api = (
+        not from_console
+        and os.environ.get("AGENT_API_CHANGES", "true") == "true"
+        and client_mod.parse(record.get("userAgent"))["kind"] == "ai-agent"
+    )
+    if not from_console and not agent_api:
+        return False, "not a console session or a labelled AI agent"
     read_only = record.get("readOnly")
     if read_only in (True, "true"):
         return False, "read-only event"
@@ -137,6 +150,90 @@ def is_console_mutation(record: dict) -> tuple[bool, str]:
     if invoked_by:
         return False, f"invoked by service {invoked_by}"
     return True, ""
+
+
+def _old_value(response, name: str) -> str | list:
+    attributes = response.get("Attributes") if isinstance(response, dict) else None
+    value = attributes.get(name) if isinstance(attributes, dict) else None
+    if not isinstance(value, dict):
+        return ""
+    return value.get("S") or value.get("SS") or ""
+
+
+def track_client(session_id: str, actor_id: str, context: dict, ip_info: dict | None) -> None:
+    """Compare this change's client and country with the session and the actor's history.
+
+    A session that switches client or country mid-session is an anomaly (a
+    stolen session cookie or temporary credentials replayed elsewhere). A
+    client the actor never used before is an observation. Best-effort.
+    """
+    info = context["client"]
+    fingerprint = info["fingerprint"]
+    if not fingerprint:
+        return
+    country = (ip_info or {}).get("country", "")
+    now = int(time.time())
+    table = _table_name()
+    dynamodb = _client("dynamodb")
+
+    names = {"#f": "fingerprint", "#l": "client_label", "#t": "ttl"}
+    values = {
+        ":f": {"S": fingerprint},
+        ":l": {"S": client_mod.describe(info)},
+        ":t": {"N": str(now + SESSION_CLIENT_TTL_SECONDS)},
+    }
+    expression = "SET #f = :f, #l = :l, #t = :t"
+    if country:
+        names["#c"] = "country"
+        values[":c"] = {"S": country}
+        expression += ", #c = :c"
+    try:
+        response = dynamodb.update_item(
+            TableName=table,
+            Key={"pk": {"S": f"SESSION#{session_id}"}, "sk": {"S": "CLIENT"}},
+            UpdateExpression=expression,
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
+            ReturnValues="UPDATED_OLD",
+        )
+        old_fingerprint = _old_value(response, "fingerprint")
+        old_country = _old_value(response, "country")
+        if old_fingerprint and old_fingerprint != fingerprint:
+            old_label = _old_value(response, "client_label") or "another client"
+            switch = f"{old_label} to {client_mod.describe(info)}"
+            # Browser to browser is a replayed session; CloudShell or a CLI
+            # sharing the session is ordinary use, worth noting only.
+            if client_mod.is_browser_fingerprint(old_fingerprint) and client_mod.is_browser(info):
+                context["anomalies"].append(f"client changed mid-session: {switch}")
+            else:
+                context["observations"].append(f"session used from several clients: {switch}")
+        if old_country and country and old_country != country:
+            context["anomalies"].append(
+                f"source country changed mid-session: {old_country} to {country}"
+            )
+    except Exception as error:  # noqa: BLE001 tracking must never block the alert
+        logger.warning("session client tracking failed: %s", error)
+
+    history_days = int(os.environ.get("CLIENT_HISTORY_DAYS", "180"))
+    try:
+        response = dynamodb.update_item(
+            TableName=table,
+            Key={"pk": {"S": f"ACTOR#{actor_id}"}, "sk": {"S": "CLIENTS"}},
+            UpdateExpression="ADD #fps :fp SET #t = :t",
+            ExpressionAttributeNames={"#fps": "fingerprints", "#t": "ttl"},
+            ExpressionAttributeValues={
+                ":fp": {"SS": [fingerprint]},
+                ":t": {"N": str(now + history_days * 24 * 3600)},
+            },
+            ReturnValues="UPDATED_OLD",
+        )
+        known = _old_value(response, "fingerprints")
+        if known and fingerprint not in known:
+            context["observations"].append(
+                f"first change by this actor from {client_mod.describe(info)}"
+            )
+    except Exception as error:  # noqa: BLE001 tracking must never block the alert
+        logger.warning("actor client tracking failed: %s", error)
 
 
 def _publish_chat(alert: dict, thread_id: str) -> None:
@@ -150,24 +247,36 @@ def _publish_chat(alert: dict, thread_id: str) -> None:
 
 
 def publish_plain(
-    record: dict, who: str, session_id: str, rating: dict | None, ip_info: dict | None
+    record: dict,
+    who: str,
+    session_id: str,
+    rating: dict | None,
+    ip_info: dict | None,
+    context: dict,
 ) -> None:
     account_label = get_account_label(record)
-    alert = notify.build_plain_alert(record, who, account_label, rating, ip_info)
+    alert = notify.build_plain_alert(record, who, account_label, rating, ip_info, context)
     _publish_chat(alert, session_id)
-    email = email_render.plain_email(record, who, account_label, "", rating, ip_info)
+    email = email_render.plain_email(record, who, account_label, "", rating, ip_info, context)
     email_send.send_email(email["subject"], email["html"], alert["text"])
 
 
-def publish_followup(record: dict, who: str, session_id: str, rating: dict | None) -> None:
-    alert = notify.build_followup_note(record, who, rating)
+def publish_followup(
+    record: dict, who: str, session_id: str, rating: dict | None, context: dict
+) -> None:
+    alert = notify.build_followup_note(record, who, rating, context)
     _publish_chat(alert, session_id)
     email = email_render.note_email(alert["title"], alert["text"])
     email_send.send_email(email["subject"], email["html"], alert["text"])
 
 
 def invoke_investigator(
-    record: dict, who: dict, account_label: str, session_id: str, ip_info: dict | None
+    record: dict,
+    who: dict,
+    account_label: str,
+    session_id: str,
+    ip_info: dict | None,
+    context: dict,
 ) -> None:
     payload = {
         "record": record,
@@ -175,6 +284,7 @@ def invoke_investigator(
         "account_label": account_label,
         "session_id": session_id,
         "ip_info": ip_info,
+        "context": context,
     }
     _client("lambda").invoke(
         FunctionName=os.environ["INVESTIGATOR_FUNCTION_NAME"],
@@ -183,11 +293,11 @@ def invoke_investigator(
     )
 
 
-def handle_console_action(record: dict) -> dict:
+def handle_change(record: dict) -> dict:
     event_id = record.get("eventID", "unknown")
     event_name = record.get("eventName", "")
 
-    accepted, reason = is_console_mutation(record)
+    accepted, reason = is_watched_change(record)
     if not accepted:
         log_decision(event_id, "skipped", reason=reason, eventName=event_name)
         return {"decision": "skipped", "reason": reason}
@@ -204,41 +314,46 @@ def handle_console_action(record: dict) -> dict:
     who = identity_mod.extract_identity(record)
     session_id = extract_session_id(record)
     account_label = get_account_label(record)
-    rating = criticality.classify(record)
+    context = client_mod.new_context(record)
+    ip_info = ip_intel.lookup(record.get("sourceIPAddress"))
+    track_client(session_id, who["actor_id"], context, ip_info)
+    rating = criticality.apply_session_anomalies(
+        criticality.classify(record), context["anomalies"]
+    )
     level = criticality.level_of(rating)
+    log_fields = {
+        "eventName": event_name,
+        "actor": who["actor_id"],
+        "criticality": level,
+        "origin": context["origin"],
+        "client": context["client"]["kind"],
+        "agent": context["client"]["agent"],
+        "anomalies": len(context["anomalies"]),
+    }
 
     ai_enabled = os.environ.get("ENABLE_AI") == "true"
     cooldown_bypassed = False
     if ai_enabled and session_cooldown_active(session_id):
-        if not criticality.bypasses_cooldown(rating):
-            publish_followup(record, who["display"], session_id, rating)
-            log_decision(
-                event_id, "followup", eventName=event_name, session=session_id, criticality=level
-            )
+        # A session that switched client or country gets a fresh investigation.
+        if not criticality.bypasses_cooldown(rating) and not context["anomalies"]:
+            publish_followup(record, who["display"], session_id, rating, context)
+            log_decision(event_id, "followup", session=session_id, **log_fields)
             return {"decision": "followup"}
         cooldown_bypassed = True
 
-    ip_info = ip_intel.lookup(record.get("sourceIPAddress"))
     if ai_enabled:
         try:
-            invoke_investigator(record, who, account_label, session_id, ip_info)
+            invoke_investigator(record, who, account_label, session_id, ip_info, context)
             log_decision(
-                event_id,
-                "investigating",
-                eventName=event_name,
-                actor=who["actor_id"],
-                criticality=level,
-                cooldown_bypassed=cooldown_bypassed,
+                event_id, "investigating", cooldown_bypassed=cooldown_bypassed, **log_fields
             )
             return {"decision": "investigating"}
         except ClientError as error:
             # Never drop an alert: fall back to the plain path.
             logger.error("investigator invoke failed: %s", error)
 
-    publish_plain(record, who["display"], session_id, rating, ip_info)
-    log_decision(
-        event_id, "notified", eventName=event_name, actor=who["actor_id"], criticality=level
-    )
+    publish_plain(record, who["display"], session_id, rating, ip_info, context)
+    log_decision(event_id, "notified", **log_fields)
     return {"decision": "notified"}
 
 
@@ -270,9 +385,14 @@ def handle_console_login(record: dict) -> dict:
     account_label = get_account_label(record)
     reason = ", ".join(reasons)
     ip_info = ip_intel.lookup(record.get("sourceIPAddress"))
-    alert = notify.build_login_alert(record, who["display"], account_label, reason, ip_info)
+    info = client_mod.parse(record.get("userAgent"))
+    alert = notify.build_login_alert(
+        record, who["display"], account_label, reason, ip_info, info
+    )
     _publish_chat(alert, f"signin-{event_id}")
-    email = email_render.login_email(record, who["display"], account_label, reason, ip_info)
+    email = email_render.login_email(
+        record, who["display"], account_label, reason, ip_info, info
+    )
     email_send.send_email(email["subject"], email["html"], alert["text"])
     log_decision(event_id, "login-alert", reasons=reasons)
     return {"decision": "login-alert"}
@@ -283,4 +403,4 @@ def lambda_handler(event: dict, context) -> dict:
     record = event.get("detail") or {}
     if detail_type == "AWS Console Sign In via CloudTrail":
         return handle_console_login(record)
-    return handle_console_action(record)
+    return handle_change(record)

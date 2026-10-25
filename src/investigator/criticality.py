@@ -79,6 +79,7 @@ TECHNIQUES = {
     "T1531": "Account Access Removal",
     "T1535": "Unused/Unsupported Cloud Regions",
     "T1537": "Transfer Data to Cloud Account",
+    "T1550.004": "Use Alternate Authentication Material: Web Session Cookie",
     "T1552.005": "Unsecured Credentials: Cloud Instance Metadata API",
     "T1556.006": "Modify Authentication Process: Multi-Factor Authentication",
     "T1562.001": "Impair Defenses: Disable or Modify Tools",
@@ -1039,7 +1040,14 @@ SELF_RULE = Rule(
     ("T1562.001",),
 )
 
-MODIFIER_RULES = (ROOT_RULE, SELF_RULE)
+SESSION_RULE = Rule(
+    "SES-001", "high", "Lateral Movement",
+    "Session switched client or country mid-session",
+    (),
+    ("T1550.004",),
+)
+
+MODIFIER_RULES = (ROOT_RULE, SELF_RULE, SESSION_RULE)
 
 _INDEX: dict = {}
 for _rule in RULES:
@@ -1152,6 +1160,36 @@ def classify(record: dict, overrides: str | None = None, stack_name: str | None 
         "stratus": list(rule.stratus),
         "reasons": reasons,
     }
+
+
+def apply_session_anomalies(rating, anomalies) -> dict | None:
+    """Raise a rating to the SES-001 floor when the session switched client or country.
+
+    Anomalies are reasons found outside the record itself, by comparing it
+    with earlier events of the same session. Without a catalog match the
+    session rule becomes the rating.
+    """
+    if not anomalies:
+        return rating
+    rule = SESSION_RULE
+    if rating is None:
+        rating = {
+            "level": rule.level,
+            "rule_id": rule.rule_id,
+            "title": rule.title,
+            "tactic": rule.tactic,
+            "techniques": list(rule.techniques),
+            "stratus": [],
+            "reasons": [],
+        }
+    else:
+        rating = {**rating, "reasons": list(rating["reasons"])}
+        rating["level"] = apply_floor(rule.level, rating)
+        rating["techniques"] = rating["techniques"] + [
+            t for t in rule.techniques if t not in rating["techniques"]
+        ]
+    rating["reasons"] += [reason for reason in anomalies if reason not in rating["reasons"]]
+    return rating
 
 
 def level_of(rating) -> str:
