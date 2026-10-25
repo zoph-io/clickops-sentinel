@@ -2,9 +2,12 @@
 """Rich HTML email rendering.
 
 Bulletproof email HTML: table layout, inline styles only, no external
-resources, no scripts. The console session path diagram is plain HTML and
-CSS so it survives Gmail and Outlook. Project writing style applies to all
-rendered output: no em-dashes, no en-dashes, no emojis.
+resources, no scripts, no images. The brand shows through the wordmark and
+the amber signal dot, so every email renders the same with images blocked.
+Colors and fonts are the design tokens in docs/brand/tokens.json (a test
+keeps them equal); docs/brand/README.md documents the components. Project
+writing style applies to all rendered output: no em-dashes, no en-dashes,
+no emojis.
 
 This module is duplicated in src/detector and src/investigator because SAM
 packages each CodeUri separately. Keep both copies identical.
@@ -17,37 +20,91 @@ import criticality
 import ip_intel
 import origin
 
-DARK = "#0f1420"
-BRAND_COLOR = "#7dd3fc"
-MUTED = "#64748b"
-FAINT = "#94a3b8"
-BODY_TEXT = "#1e293b"
+COLOR = {
+    "night": "#0f1420",
+    "night_raised": "#1e293b",
+    "ink": "#1e293b",
+    "slate": "#64748b",
+    "mist": "#94a3b8",
+    "line": "#e2e8f0",
+    "paper": "#f8fafc",
+    "surface": "#f1f5f9",
+    "white": "#ffffff",
+    "signal": "#f59e0b",
+    "signal_soft": "#fffbeb",
+    "signal_tint": "#fef3c7",
+    "signal_line": "#fcd34d",
+    "signal_ink": "#92400e",
+    "sky": "#7dd3fc",
+    "info": "#3b82f6",
+    "info_soft": "#eff6ff",
+    "info_ink": "#1e40af",
+    "danger": "#ef4444",
+    "danger_soft": "#fee2e2",
+    "danger_ink": "#991b1b",
+    "safe": "#22c55e",
+    "safe_soft": "#dcfce7",
+    "safe_ink": "#166534",
+}
+FONT = {
+    "sans": '-apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+    "mono": 'SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+}
+TAGLINE = "Every click, watched."
+REPO_URL = "https://github.com/zoph-io/clickops-sentinel"
+
+DARK = COLOR["night"]
+MUTED = COLOR["slate"]
+FAINT = COLOR["mist"]
+BODY_TEXT = COLOR["ink"]
+NEUTRAL_TEXT = "#334155"
+SANS = FONT["sans"].replace('"', "'")
+MONO = FONT["mono"].replace('"', "'")
+
+# Status stripe across the top of the card: the one-glance severity cue.
+TONES = {
+    "danger": COLOR["danger"],
+    "signal": COLOR["signal"],
+    "safe": COLOR["safe"],
+    "neutral": COLOR["mist"],
+}
 
 VERDICT_STYLES = {
-    "manual-change-confirmed": ("MANUAL CHANGE CONFIRMED", "#f59e0b", DARK),
-    "likely-sanctioned-activity": ("LIKELY SANCTIONED ACTIVITY", "#22c55e", DARK),
-    "suspicious": ("SUSPICIOUS", "#ef4444", "#ffffff"),
+    "manual-change-confirmed": ("MANUAL CHANGE CONFIRMED", COLOR["signal"], DARK),
+    "likely-sanctioned-activity": ("LIKELY SANCTIONED ACTIVITY", COLOR["safe"], DARK),
+    "suspicious": ("SUSPICIOUS", COLOR["danger"], COLOR["white"]),
+}
+VERDICT_TONES = {
+    "manual-change-confirmed": "signal",
+    "likely-sanctioned-activity": "safe",
+    "suspicious": "danger",
 }
 
 SEVERITY_STYLES = {
-    "none": ("#dcfce7", "#166534"),
-    "low": ("#dcfce7", "#166534"),
-    "medium": ("#fef3c7", "#92400e"),
-    "high": ("#fee2e2", "#991b1b"),
-    "critical": ("#fee2e2", "#991b1b"),
+    "none": (COLOR["safe_soft"], COLOR["safe_ink"]),
+    "low": (COLOR["safe_soft"], COLOR["safe_ink"]),
+    "medium": (COLOR["signal_tint"], COLOR["signal_ink"]),
+    "high": (COLOR["danger_soft"], COLOR["danger_ink"]),
+    "critical": (COLOR["danger_soft"], COLOR["danger_ink"]),
 }
 
 COST_STYLES = {
-    "negligible": ("#f1f5f9", "#334155"),
-    "low": ("#f1f5f9", "#334155"),
-    "moderate": ("#fef3c7", "#92400e"),
-    "significant": ("#fee2e2", "#991b1b"),
-    "savings": ("#dcfce7", "#166534"),
+    "negligible": (COLOR["surface"], NEUTRAL_TEXT),
+    "low": (COLOR["surface"], NEUTRAL_TEXT),
+    "moderate": (COLOR["signal_tint"], COLOR["signal_ink"]),
+    "significant": (COLOR["danger_soft"], COLOR["danger_ink"]),
+    "savings": (COLOR["safe_soft"], COLOR["safe_ink"]),
+}
+
+CALLOUTS = {
+    "info": (COLOR["info_soft"], COLOR["info"], COLOR["info_ink"]),
+    "neutral": (COLOR["paper"], COLOR["mist"], COLOR["slate"]),
+    "signal": (COLOR["signal_soft"], COLOR["signal"], COLOR["signal_ink"]),
 }
 
 SERVICE_COLORS = {
-    "signin": "#334155",
-    "sts": "#334155",
+    "signin": NEUTRAL_TEXT,
+    "sts": NEUTRAL_TEXT,
     "ec2": "#0ea5e9",
     "s3": "#16a34a",
     "iam": "#8b5cf6",
@@ -78,16 +135,20 @@ def _service_slug(event_source: str) -> str:
     return str(event_source or "").split(".")[0] or "aws"
 
 
+def _level_tone(level: str) -> str:
+    return "danger" if criticality.RANK.get(level, 0) >= criticality.RANK["high"] else "signal"
+
+
 def _service_badge(event_source: str, highlighted: bool = False) -> str:
     slug = _service_slug(event_source)
     label = _esc(slug.upper()[:9])
     if highlighted:
-        background, color = "#f59e0b", DARK
+        background, color = COLOR["signal"], DARK
     else:
-        background, color = SERVICE_COLORS.get(slug, DEFAULT_SERVICE_COLOR), "#ffffff"
+        background, color = SERVICE_COLORS.get(slug, DEFAULT_SERVICE_COLOR), COLOR["white"]
     return (
         f'<div style="background:{background};color:{color};font-size:10px;'
-        f'font-weight:700;padding:6px 0;border-radius:6px;font-family:monospace;">'
+        f'font-weight:700;padding:6px 0;border-radius:6px;font-family:{MONO};">'
         f"{label}</div>"
     )
 
@@ -101,42 +162,57 @@ def cloudtrail_console_link(region: str, event_id: str) -> str:
 
 def _document(header_html: str, body_html: str) -> str:
     footer = (
-        "ClickOps Sentinel &middot; open-source console-change detection "
-        "&middot; Apache-2.0"
+        f'<b style="color:{MUTED};">ClickOps Sentinel</b> &middot; {_esc(TAGLINE)} '
+        f'&middot; <a href="{REPO_URL}" style="color:{FAINT};">open source, Apache-2.0</a>'
     )
     return (
         "<!DOCTYPE html>"
-        '<html><body style="margin:0;padding:0;background:' + DARK + ';">'
+        f'<html><body style="margin:0;padding:0;background:{DARK};">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
-        f'style="background:{DARK};padding:24px 0;font-family:-apple-system,'
-        "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\">"
+        f'style="background:{DARK};padding:24px 0;font-family:{SANS};">'
         '<tr><td align="center">'
         '<table role="presentation" width="600" cellpadding="0" cellspacing="0" '
-        'style="width:600px;max-width:600px;background:#ffffff;border-radius:14px;'
-        'overflow:hidden;">'
+        f'style="width:600px;max-width:600px;background:{COLOR["white"]};'
+        'border-radius:14px;overflow:hidden;">'
         + header_html
         + body_html
-        + '<tr><td style="background:#f8fafc;padding:14px 24px;'
-        'border-top:1px solid #e2e8f0;">'
+        + f'<tr><td style="background:{COLOR["paper"]};padding:14px 24px;'
+        f'border-top:1px solid {COLOR["line"]};">'
         f'<div style="color:{FAINT};font-size:11px;">{footer}</div>'
         "</td></tr>"
         "</table></td></tr></table></body></html>"
     )
 
 
-def _header(title: str, account_label: str, region: str, pills_html: str) -> str:
+def _wordmark() -> str:
+    """Amber signal dot plus CLICKOPS SENTINEL: the logo, in text."""
+    return (
+        f'<span style="display:inline-block;width:8px;height:8px;border-radius:50%;'
+        f'background:{COLOR["signal"]};border:3px solid #4a3410;'
+        'vertical-align:middle;margin-right:8px;"></span>'
+        f'<span style="color:{COLOR["white"]};font-size:13px;font-weight:800;'
+        'letter-spacing:1.5px;vertical-align:middle;">CLICKOPS</span> '
+        f'<span style="color:{COLOR["signal"]};font-size:13px;font-weight:800;'
+        'letter-spacing:1.5px;vertical-align:middle;">SENTINEL</span>'
+    )
+
+
+def _header(
+    title: str, account_label: str, region: str, pills_html: str, tone: str = "signal"
+) -> str:
     parts = [_esc(part) for part in (account_label, region) if part]
     context = " &middot; ".join(parts)
+    stripe = TONES.get(tone, TONES["signal"])
     return (
-        f'<tr><td style="background:{DARK};padding:20px 24px;">'
+        f'<tr><td style="background:{DARK};border-top:4px solid {stripe};'
+        'padding:18px 24px 20px 24px;">'
         '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        f'<td style="color:{BRAND_COLOR};font-size:13px;font-weight:700;'
-        'letter-spacing:1.5px;">CLICKOPS SENTINEL</td>'
+        f"<td>{_wordmark()}</td>"
         f'<td align="right" style="color:{FAINT};font-size:12px;'
-        f'font-family:monospace;">{context}</td>'
+        f'font-family:{MONO};">{context}</td>'
         "</tr></table>"
-        f'<div style="color:#ffffff;font-size:20px;font-weight:700;margin-top:12px;">'
-        f"{_esc(title)}</div>"
+        f'<div style="color:{COLOR["white"]};font-size:20px;font-weight:700;'
+        f'margin-top:14px;">{_esc(title)}</div>'
         + (f'<div style="margin-top:10px;">{pills_html}</div>' if pills_html else "")
         + "</td></tr>"
     )
@@ -147,6 +223,19 @@ def _pill(label: str, background: str, color: str) -> str:
         f'<span style="display:inline-block;background:{background};color:{color};'
         'font-size:11px;font-weight:700;padding:5px 11px;border-radius:999px;'
         f'margin-right:6px;">{_esc(label)}</span>'
+    )
+
+
+def _level_pill(level: str) -> str:
+    background, color = SEVERITY_STYLES.get(level, SEVERITY_STYLES["none"])
+    return _pill(level.upper(), background, color)
+
+
+def _eyebrow(label: str, margin_bottom: int = 0) -> str:
+    """Small uppercase section label, the same everywhere."""
+    return (
+        f'<div style="color:{MUTED};font-size:10px;font-weight:700;letter-spacing:.5px;'
+        f'margin-bottom:{margin_bottom}px;">{label}</div>'
     )
 
 
@@ -169,34 +258,35 @@ def _who_block(
         if ip_info.get("flags"):
             flags = ", ".join(flag.upper() for flag in ip_info["flags"])
             network_html += (
-                '<div style="color:#991b1b;font-size:11px;font-weight:700;margin-top:2px;">'
-                f"Source flagged: {_esc(flags)}</div>"
+                f'<div style="color:{COLOR["danger_ink"]};font-size:11px;font-weight:700;'
+                f'margin-top:2px;">Source flagged: {_esc(flags)}</div>'
             )
     client_html = ""
     client_line = client_mod.describe(client_info)
     if client_line:
         if context and context.get("origin") == "api":
             client_line += " (API call, not the console)"
-        color = "#92400e" if client_mod.is_automated(client_info) else MUTED
-        weight = "700" if client_mod.is_automated(client_info) else "400"
+        automated = client_mod.is_automated(client_info)
+        color = COLOR["signal_ink"] if automated else MUTED
+        weight = "700" if automated else "400"
         client_html = (
             f'<div style="color:{color};font-size:12px;font-weight:{weight};margin-top:2px;">'
             f"Client: {_esc(client_line)}</div>"
         )
     for anomaly in (context or {}).get("anomalies", []):
         client_html += (
-            '<div style="color:#991b1b;font-size:11px;font-weight:700;margin-top:2px;">'
-            f"Session anomaly: {_esc(anomaly)}</div>"
+            f'<div style="color:{COLOR["danger_ink"]};font-size:11px;font-weight:700;'
+            f'margin-top:2px;">Session anomaly: {_esc(anomaly)}</div>'
         )
     for observation in (context or {}).get("observations", []):
         client_html += (
-            '<div style="color:#92400e;font-size:11px;margin-top:2px;">'
+            f'<div style="color:{COLOR["signal_ink"]};font-size:11px;margin-top:2px;">'
             f"Note: {_esc(observation)}</div>"
         )
     assessment = (context or {}).get("assessment")
     if assessment and assessment.get("evidence"):
         machine = assessment.get("driver") in ("ai-agent", "automation")
-        color = "#92400e" if machine else MUTED
+        color = COLOR["signal_ink"] if machine else MUTED
         client_html += (
             f'<div style="color:{color};font-size:12px;font-weight:700;margin-top:6px;">'
             f"Driven by: {_esc(origin.describe(assessment))}</div>"
@@ -208,13 +298,13 @@ def _who_block(
             )
         if assessment.get("conflict"):
             client_html += (
-                '<div style="color:#991b1b;font-size:11px;font-weight:700;margin-top:2px;">'
-                f"Signals disagree: {_esc(assessment['conflict'])}</div>"
+                f'<div style="color:{COLOR["danger_ink"]};font-size:11px;font-weight:700;'
+                f'margin-top:2px;">Signals disagree: {_esc(assessment["conflict"])}</div>'
             )
     return (
         '<tr><td style="padding:18px 24px 4px 24px;">'
         f'<div style="color:{DARK};font-size:14px;"><b>{_esc(who)}</b></div>'
-        f'<div style="color:{FAINT};font-size:12px;font-family:monospace;'
+        f'<div style="color:{FAINT};font-size:12px;font-family:{MONO};'
         f'margin-top:2px;">{_esc(source_ip)} &middot; {_esc(event_time)}</div>'
         f"{network_html}{client_html}"
         "</td></tr>"
@@ -245,21 +335,57 @@ def _card(label: str, value: str, detail: str, background: str, color: str) -> s
     )
 
 
+def _cards(*cards: str) -> str:
+    return (
+        '<tr><td style="padding:12px 18px;">'
+        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
+        + "".join(cards)
+        + "</tr></table></td></tr>"
+    )
+
+
+def _action_card(record: dict) -> str:
+    return _card(
+        "ACTION",
+        record.get("eventName", "UnknownEvent"),
+        _service_slug(record.get("eventSource", "")),
+        COLOR["surface"],
+        NEUTRAL_TEXT,
+    )
+
+
+def _criticality_card(rating: dict | None) -> str:
+    level = criticality.level_of(rating)
+    if not level:
+        return _card("CRITICALITY", "UNRATED", "no catalog match", COLOR["surface"], NEUTRAL_TEXT)
+    background, color = SEVERITY_STYLES.get(level, SEVERITY_STYLES["none"])
+    return _card("CRITICALITY", level.upper(), rating["rule_id"], background, color)
+
+
+def _result_card(record: dict) -> str:
+    error = record.get("errorCode")
+    if error:
+        return _card(
+            "RESULT", "FAILED", f"failed ({error})", COLOR["danger_soft"], COLOR["danger_ink"]
+        )
+    return _card("RESULT", "APPLIED", "", COLOR["surface"], NEUTRAL_TEXT)
+
+
+def _facts_row(record: dict, rating: dict | None) -> str:
+    """Action, criticality, result: the three facts every detection carries."""
+    return _cards(_action_card(record), _criticality_card(rating), _result_card(record))
+
+
 def _cards_row(record: dict, verdict: dict, rating: dict | None = None) -> str:
-    event_name = record.get("eventName", "UnknownEvent")
-    service = _service_slug(record.get("eventSource", ""))
     severity = verdict.get("security_severity", "none")
     cost = verdict.get("cost_impact", "negligible")
     severity_bg, severity_fg = SEVERITY_STYLES.get(severity, SEVERITY_STYLES["none"])
     cost_bg, cost_fg = COST_STYLES.get(cost, COST_STYLES["negligible"])
     rule_id = rating["rule_id"] if rating else ""
-    return (
-        '<tr><td style="padding:12px 18px;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        + _card("ACTION", event_name, service, "#f1f5f9", "#334155")
-        + _card("SECURITY", severity.upper(), rule_id, severity_bg, severity_fg)
-        + _card("COST IMPACT", cost.upper(), "", cost_bg, cost_fg)
-        + "</tr></table></td></tr>"
+    return _cards(
+        _action_card(record),
+        _card("SECURITY", severity.upper(), rule_id, severity_bg, severity_fg),
+        _card("COST IMPACT", cost.upper(), "", cost_bg, cost_fg),
     )
 
 
@@ -288,7 +414,7 @@ def _criticality_block(rating: dict | None, agent_severity: str = "") -> str:
         )
     if rating.get("stratus"):
         lines.append(
-            f'<div style="color:{MUTED};font-size:12px;font-family:monospace;">'
+            f'<div style="color:{MUTED};font-size:12px;font-family:{MONO};">'
             f"Stratus Red Team: {_esc(', '.join(rating['stratus']))}</div>"
         )
     if rating.get("reasons"):
@@ -303,10 +429,9 @@ def _criticality_block(rating: dict | None, agent_severity: str = "") -> str:
         )
     return (
         '<tr><td style="padding:8px 24px;">'
-        f'<div style="color:{MUTED};font-size:10px;font-weight:700;letter-spacing:.5px;">'
-        f"CRITICALITY CATALOG &middot; {_esc(level.upper())}</div>"
-        f'<div style="background:{background};border-left:4px solid {color};'
-        f'border-radius:6px;padding:10px 12px;margin-top:4px;">'
+        + _eyebrow(f"CRITICALITY CATALOG &middot; {_esc(level.upper())}")
+        + f'<div style="background:{background};border-left:4px solid {color};'
+        'border-radius:6px;padding:10px 12px;margin-top:4px;">'
         + "".join(lines)
         + "</div></td></tr>"
     )
@@ -317,22 +442,23 @@ def _section(label: str, text: str) -> str:
         return ""
     return (
         '<tr><td style="padding:8px 24px;">'
-        f'<div style="color:{MUTED};font-size:10px;font-weight:700;'
-        f'letter-spacing:.5px;">{_esc(label)}</div>'
-        f'<div style="color:{BODY_TEXT};font-size:14px;line-height:1.5;">'
+        + _eyebrow(_esc(label))
+        + f'<div style="color:{BODY_TEXT};font-size:14px;line-height:1.5;">'
         f"{_esc(text)}</div></td></tr>"
     )
 
 
-def _recommendation(text: str) -> str:
+def _callout(label: str, text: str, tone: str = "info") -> str:
+    """Boxed note with a colored rule: recommendation, context, notices."""
     if not text:
         return ""
+    background, rule, ink = CALLOUTS.get(tone, CALLOUTS["info"])
     return (
         '<tr><td style="padding:16px 24px 4px 24px;">'
-        '<div style="background:#eff6ff;border-left:4px solid #3b82f6;'
+        f'<div style="background:{background};border-left:4px solid {rule};'
         'border-radius:6px;padding:12px 14px;">'
-        '<div style="color:#1e40af;font-size:10px;font-weight:700;'
-        'letter-spacing:.5px;">RECOMMENDATION</div>'
+        f'<div style="color:{ink};font-size:10px;font-weight:700;'
+        f'letter-spacing:.5px;">{_esc(label)}</div>'
         f'<div style="color:{BODY_TEXT};font-size:14px;line-height:1.5;">'
         f"{_esc(text)}</div></div></td></tr>"
     )
@@ -342,7 +468,7 @@ def _cta(link: str, label: str = "View event in CloudTrail") -> str:
     return (
         '<tr><td style="padding:16px 24px 24px 24px;" align="center">'
         f'<a href="{_esc(link)}" style="display:inline-block;background:{DARK};'
-        'color:#ffffff;font-size:13px;font-weight:700;text-decoration:none;'
+        f'color:{COLOR["white"]};font-size:13px;font-weight:700;text-decoration:none;'
         f'padding:12px 22px;border-radius:8px;">{_esc(label)}</a></td></tr>'
     )
 
@@ -370,16 +496,16 @@ def _path_step(step: dict, is_last: bool) -> str:
 
     if highlighted:
         body = (
-            '<div style="background:#fffbeb;border:1px solid #fcd34d;'
-            'border-radius:8px;padding:8px 10px;">'
+            f'<div style="background:{COLOR["signal_soft"]};'
+            f'border:1px solid {COLOR["signal_line"]};border-radius:8px;padding:8px 10px;">'
             f'<div style="color:{DARK};font-size:13px;font-weight:700;'
-            f'font-family:monospace;">{name} &larr; this alert</div>'
-            f'<div style="color:#92400e;font-size:11px;">{meta}</div></div>'
+            f'font-family:{MONO};">{name} &larr; this alert</div>'
+            f'<div style="color:{COLOR["signal_ink"]};font-size:11px;">{meta}</div></div>'
         )
     else:
         body = (
             f'<div style="color:{DARK};font-size:13px;font-weight:600;'
-            f'font-family:monospace;">{name}</div>'
+            f'font-family:{MONO};">{name}</div>'
             f'<div style="color:{FAINT};font-size:11px;">{meta}</div>'
         )
     return (
@@ -419,10 +545,8 @@ def _session_path(session_steps: list, label: str = "CONSOLE SESSION PATH") -> s
 
     return (
         '<tr><td style="padding:16px 24px 4px 24px;">'
-        f'<div style="color:{MUTED};font-size:10px;font-weight:700;'
-        'letter-spacing:.5px;margin-bottom:12px;">'
-        f"{_esc(label)}</div>"
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
+        + _eyebrow(_esc(label), margin_bottom=12)
+        + '<table role="presentation" width="100%" cellpadding="0" cellspacing="0">'
         + "".join(rows)
         + "</table></td></tr>"
     )
@@ -450,6 +574,17 @@ def mark_highlighted_step(session_steps: list, record: dict) -> list:
     return marked
 
 
+def _who(record: dict, who: str, ip_info: dict | None, context: dict | None) -> str:
+    return _who_block(
+        who,
+        record.get("sourceIPAddress", "unknown"),
+        record.get("eventTime", ""),
+        ip_info,
+        (context or {}).get("client"),
+        context,
+    )
+
+
 def enriched_email(
     record: dict,
     who: str,
@@ -466,12 +601,16 @@ def enriched_email(
     link = cloudtrail_console_link(region, record.get("eventID", ""))
 
     verdict_key = verdict.get("verdict", "manual-change-confirmed")
-    verdict_label, verdict_bg, verdict_fg = VERDICT_STYLES.get(
-        verdict_key, VERDICT_STYLES["manual-change-confirmed"]
-    )
+    if verdict_key not in VERDICT_STYLES:
+        verdict_key = "manual-change-confirmed"
+    verdict_label, verdict_bg, verdict_fg = VERDICT_STYLES[verdict_key]
     pills = _pill(verdict_label, verdict_bg, verdict_fg) + _pill(
-        f"confidence {verdict.get('confidence', 'unknown')}", "#1e293b", "#e2e8f0"
+        f"confidence {verdict.get('confidence', 'unknown')}", COLOR["night_raised"], COLOR["line"]
     )
+    severity = verdict.get("security_severity", "")
+    tone = VERDICT_TONES[verdict_key]
+    if _level_tone(severity) == "danger":
+        tone = "danger"
 
     history = verdict.get("history_context", "")
     if history and history.lower() == "none":
@@ -479,14 +618,7 @@ def enriched_email(
 
     api_origin = (context or {}).get("origin") == "api"
     body = (
-        _who_block(
-            who,
-            record.get("sourceIPAddress", "unknown"),
-            record.get("eventTime", ""),
-            ip_info,
-            (context or {}).get("client"),
-            context,
-        )
+        _who(record, who, ip_info, context)
         + _cards_row(record, verdict, rating)
         + _section("PURPOSE", verdict.get("purpose", ""))
         + _criticality_block(rating, verdict.get("agent_security_severity", ""))
@@ -497,11 +629,11 @@ def enriched_email(
         + _section("SECURITY", verdict.get("security_analysis", ""))
         + _section("COST", verdict.get("cost_analysis", ""))
         + _section("HISTORY", history)
-        + _recommendation(verdict.get("recommendation", ""))
+        + _callout("RECOMMENDATION", verdict.get("recommendation", ""), "info")
         + _cta(link)
     )
-    header = _header(_header_title(context), account_label, region, pills)
-    prefix = criticality.title_prefix(verdict.get("security_severity", ""))
+    header = _header(_header_title(context), account_label, region, pills, tone)
+    prefix = criticality.title_prefix(severity)
     return {
         "subject": f"{prefix}{client_mod.headline(context)}: {event_name}",
         "html": _document(header, body),
@@ -519,49 +651,61 @@ def plain_email(
 ) -> dict:
     """Detection email without agent-derived sections."""
     event_name = record.get("eventName", "UnknownEvent")
-    event_source = record.get("eventSource", "unknown")
     region = record.get("awsRegion", "us-east-1")
     link = cloudtrail_console_link(region, record.get("eventID", ""))
-
-    action_note = ""
-    if record.get("errorCode"):
-        action_note = f"failed ({record['errorCode']})"
-
     level = criticality.level_of(rating)
-    if level:
-        level_bg, level_fg = SEVERITY_STYLES.get(level, SEVERITY_STYLES["none"])
-        level_card = _card("CRITICALITY", level.upper(), rating["rule_id"], level_bg, level_fg)
-    else:
-        level_card = _card("CRITICALITY", "UNRATED", "no catalog match", "#f1f5f9", "#334155")
 
     body = (
-        _who_block(
-            who,
-            record.get("sourceIPAddress", "unknown"),
-            record.get("eventTime", ""),
-            ip_info,
-            (context or {}).get("client"),
-            context,
-        )
-        + '<tr><td style="padding:12px 18px;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        + _card("ACTION", event_name, _service_slug(event_source), "#f1f5f9", "#334155")
-        + level_card
-        + _card(
-            "RESULT",
-            "FAILED" if action_note else "APPLIED",
-            action_note,
-            "#fee2e2" if action_note else "#f1f5f9",
-            "#991b1b" if action_note else "#334155",
-        )
-        + "</tr></table></td></tr>"
+        _who(record, who, ip_info, context)
+        + _facts_row(record, rating)
         + _criticality_block(rating)
         + _section("NOTE", note)
         + _cta(link)
     )
-    header = _header(_header_title(context), account_label, region, "")
+    header = _header(_header_title(context), account_label, region, "", _level_tone(level))
     return {
         "subject": f"{criticality.title_prefix(level)}{client_mod.headline(context)}: {event_name}",
+        "html": _document(header, body),
+    }
+
+
+def followup_email(
+    record: dict,
+    who: str,
+    account_label: str,
+    rating: dict | None = None,
+    ip_info: dict | None = None,
+    context: dict | None = None,
+    cooldown_minutes: int = 30,
+) -> dict:
+    """Another change in a session investigated within the cooldown window."""
+    event_name = record.get("eventName", "UnknownEvent")
+    region = record.get("awsRegion", "us-east-1")
+    link = cloudtrail_console_link(region, record.get("eventID", ""))
+    level = criticality.level_of(rating)
+
+    pills = _pill("FOLLOW-UP", COLOR["night_raised"], COLOR["line"])
+    if level:
+        pills += _level_pill(level)
+    why = (
+        f"ClickOps Sentinel investigated this session less than {cooldown_minutes} "
+        "minutes ago, so this change joins that alert instead of starting a new "
+        "investigation. A critical change, or a session that switches client or "
+        "country, always gets its own investigation."
+    )
+    body = (
+        _who(record, who, ip_info, context)
+        + _facts_row(record, rating)
+        + _criticality_block(rating)
+        + _callout("WHY NO NEW INVESTIGATION", why, "neutral")
+        + _cta(link)
+    )
+    header = _header(
+        "Same session, additional change", account_label, region, pills, _level_tone(level)
+    )
+    return {
+        "subject": f"{criticality.title_prefix(level)}Same session, additional change: "
+        f"{event_name}",
         "html": _document(header, body),
     }
 
@@ -579,7 +723,7 @@ def login_email(
     outcome = (record.get("responseElements") or {}).get("ConsoleLogin", "Unknown")
     mfa = (record.get("additionalEventData") or {}).get("MFAUsed", "Unknown")
 
-    pills = _pill(reason.upper(), "#ef4444", "#ffffff")
+    pills = _pill(reason.upper(), COLOR["danger"], COLOR["white"])
     body = (
         _who_block(
             who,
@@ -588,26 +732,25 @@ def login_email(
             ip_info,
             client_info,
         )
-        + '<tr><td style="padding:12px 18px;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        + _card("OUTCOME", outcome, "", "#f1f5f9", "#334155")
-        + _card("MFA USED", mfa, "", "#f1f5f9", "#334155")
-        + _card("REGION", region, "", "#f1f5f9", "#334155")
-        + "</tr></table></td></tr>"
+        + _cards(
+            _card("OUTCOME", outcome, "", COLOR["surface"], NEUTRAL_TEXT),
+            _card("MFA USED", mfa, "", COLOR["surface"], NEUTRAL_TEXT),
+            _card("REGION", region, "", COLOR["surface"], NEUTRAL_TEXT),
+        )
+        + '<tr><td style="padding:0 0 12px 0;"></td></tr>'
     )
-    header = _header("Console sign-in alert", account_label, region, pills)
+    header = _header("Console sign-in alert", account_label, region, pills, "danger")
     return {
         "subject": f"Console sign-in alert: {reason}",
         "html": _document(header, body),
     }
 
 
-def note_email(title: str, body_text: str) -> dict:
-    """Minimal email for follow-up notes and operational notices."""
+def note_email(title: str, body_text: str, label: str = "NOTICE") -> dict:
+    """Operational notice, such as the AI budget running out for the day."""
     body = (
-        '<tr><td style="padding:18px 24px;">'
-        f'<div style="color:{BODY_TEXT};font-size:14px;line-height:1.5;">'
-        f"{_esc(body_text)}</div></td></tr>"
+        _callout(label, body_text, "neutral")
+        + '<tr><td style="padding:0 0 20px 0;"></td></tr>'
     )
-    header = _header(title, "", "", "")
+    header = _header(title, "", "", _pill(label, COLOR["night_raised"], COLOR["line"]), "neutral")
     return {"subject": title, "html": _document(header, body)}
