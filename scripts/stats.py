@@ -72,6 +72,7 @@ def main() -> None:
     networks = Counter()
     clients = Counter()
     agents = Counter()
+    drivers = Counter()
     total_tokens = 0
     for item in items:
         actors[item.get("actor", {}).get("S", "unknown")] += 1
@@ -85,6 +86,9 @@ def main() -> None:
         clients[item.get("client_kind", {}).get("S", "unknown")] += 1
         if "agent" in item:
             agents[item["agent"]["S"]] += 1
+        if "driver" in item:
+            confidence = item.get("driver_confidence", {}).get("S", "low")
+            drivers[f"{item['driver']['S']} ({confidence} confidence)"] += 1
         total_tokens += int(item.get("tokens_used", {}).get("N", "0"))
 
     print(f"ClickOps investigations, last {args.days} days: {len(items)}")
@@ -98,6 +102,8 @@ def main() -> None:
     print_counter("Source countries", countries)
     print_counter("Source networks", networks)
     print_counter("Clients", clients)
+    if drivers:
+        print_counter("Driven by", drivers)
     if agents:
         print_counter("AI agents", agents)
 

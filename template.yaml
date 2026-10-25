@@ -124,11 +124,15 @@ Parameters:
     Type: String
     Default: "true"
     AllowedValues: ["true", "false"]
-    Description: Also alert on API changes (not only console) whose user agent carries an AI agent app ID, set with AWS_SDK_UA_APP_ID in the agent's environment and matched against AgentAppIds.
+    Description: Also alert on API changes (not only console) by AI agents - clients whose user agent carries an AI agent app ID (set with AWS_SDK_UA_APP_ID, matched against AgentAppIds), and changes made through AWS-managed MCP servers (needs data events on the trail).
   AgentAppIds:
     Type: String
     Default: claude,cursor,codex,copilot,kiro,amazon-q,q-cli,cline,windsurf,aider,gemini,opencode,goose,devin,agent,mcp
-    Description: Comma-separated markers identifying AI agents, matched case-insensitively as substrings of the user agent app ID (app/...) and of the app hosting an embedded console browser. Use * to treat every app ID as an AI agent.
+    Description: Comma-separated markers identifying AI agents, matched case-insensitively as substrings of the user agent app ID (app/...), the app hosting an embedded console browser, source identities, role session names, and session tags. Email addresses are never matched. Use * to treat every app ID as an AI agent.
+  AgentRoleNames:
+    Type: String
+    Default: ""
+    Description: Optional comma-separated IAM role names, or parts of names, reserved for AI agents (for example AgentAccess,cursor-agent). A session of such a role counts as strong AWS-asserted evidence of an AI agent.
   AccountFriendlyName:
     Type: String
     Default: ""
@@ -174,6 +178,7 @@ Globals:
         IP_LOOKUP_PROVIDER: !Ref IpLookupProvider
         IP_LOOKUP_TOKEN_PARAM: !Ref IpLookupTokenParam
         AGENT_APP_IDS: !Ref AgentAppIds
+        AGENT_ROLE_NAMES: !Ref AgentRoleNames
 
 Resources:
 
@@ -273,6 +278,7 @@ Resources:
           SESSION_COOLDOWN_MINUTES: "30"
           AGENT_API_CHANGES: !Ref WatchAgentApiChanges
           CLIENT_HISTORY_DAYS: !Ref MemoryRetentionDays
+          SESSION_LINEAGE: "true"
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref StateTable
@@ -283,6 +289,10 @@ Resources:
         - Statement:
             - Effect: Allow
               Action: iam:ListAccountAliases
+              Resource: "*"
+            # Session lineage: the sign-in and AssumeRole behind a session.
+            - Effect: Allow
+              Action: cloudtrail:LookupEvents
               Resource: "*"
             - Effect: Allow
               Action: ssm:GetParameter
@@ -364,6 +374,38 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt AgentApiRule.Arn
+
+  # Changes an AWS-managed MCP server (AWS, EKS, ECS MCP servers) made on a
+  # user's behalf. CloudTrail logs them as data events, so the trail needs
+  # data event selectors for these calls to reach EventBridge.
+  McpServerRule:
+    Type: AWS::Events::Rule
+    Condition: AgentApiChangesWatched
+    Properties:
+      Description: Mutating CloudTrail events made through an AWS-managed MCP server.
+      State: ENABLED
+      EventPattern:
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          readOnly:
+            - false
+            - "false"
+          userIdentity:
+            invokedBy:
+              - wildcard: "*-mcp.amazonaws.com"
+      Targets:
+        - Id: detector
+          Arn: !GetAtt DetectorFunction.Arn
+
+  McpServerRulePermission:
+    Type: AWS::Lambda::Permission
+    Condition: AgentApiChangesWatched
+    Properties:
+      FunctionName: !Ref DetectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt McpServerRule.Arn
 
   ConsoleLoginRule:
     Type: AWS::Events::Rule

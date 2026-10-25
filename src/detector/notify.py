@@ -10,6 +10,7 @@ import json
 import client as client_mod
 import criticality
 import ip_intel
+import origin
 
 
 def cloudtrail_console_link(region: str, event_id: str) -> str:
@@ -70,7 +71,7 @@ def _client_fields(context: dict | None) -> list:
     signals = client_mod.signal_lines(context)
     if signals:
         fields.append(("Client signals", "; ".join(signals)))
-    return fields
+    return fields + origin.fields(context.get("assessment"))
 
 
 def build_plain_alert(

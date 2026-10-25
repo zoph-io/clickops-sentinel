@@ -374,3 +374,121 @@ def test_aws_internal_user_agent_is_not_tracked(detector_handler, base_env, monk
     event = sample_events.eventbridge_envelope(sample_events.CONSOLE_MUTATION)
     detector_handler.lambda_handler(event, None)
     fakes["dynamodb"].update_item.assert_not_called()
+
+
+# --- Who drove the change ---------------------------------------------------------
+
+
+def test_mcp_server_change_is_watched_despite_invoked_by(detector_handler, base_env, monkeypatch):
+    monkeypatch.setenv("ENABLE_AI", "false")
+    fakes = wire(detector_handler, monkeypatch)
+    event = sample_events.eventbridge_envelope(sample_events.MCP_MUTATION)
+    result = detector_handler.lambda_handler(event, None)
+    assert result["decision"] == "notified"
+    message = json.loads(fakes["sns"].publish.call_args.kwargs["Message"])
+    assert message["content"]["title"].endswith(
+        "AI agent change detected: AuthorizeSecurityGroupIngress"
+    )
+    description = message["content"]["description"]
+    assert "*Client*: AI agent via AWS MCP Server" in description
+    assert "*Driven by*: AI agent, high confidence" in description
+    assert "called through AWS MCP Server (AWS, strong)" in description
+
+
+def test_mcp_server_change_follows_the_agent_api_switch(detector_handler, base_env, monkeypatch):
+    monkeypatch.setenv("AGENT_API_CHANGES", "false")
+    wire(detector_handler, monkeypatch)
+    event = sample_events.eventbridge_envelope(sample_events.MCP_MUTATION)
+    assert detector_handler.lambda_handler(event, None)["decision"] == "skipped"
+
+
+def test_payload_carries_the_assessment(detector_handler, base_env, monkeypatch):
+    fakes = wire(detector_handler, monkeypatch)
+    event = sample_events.eventbridge_envelope(sample_events.AGENT_BROWSER_MUTATION)
+    detector_handler.lambda_handler(event, None)
+    payload = json.loads(fakes["lambda"].invoke.call_args.kwargs["Payload"])
+    assert payload["context"]["assessment"]["driver"] == "ai-agent"
+    assert payload["context"]["lineage"] == {}
+
+
+def lineage_cloudtrail(monkeypatch, detector_handler, events_by_attribute):
+    calls = []
+
+    def lookup_events(**kwargs):
+        attribute = kwargs["LookupAttributes"][0]["AttributeKey"]
+        calls.append(attribute)
+        events = events_by_attribute.get(attribute, [])
+        return {"Events": [{"CloudTrailEvent": json.dumps(event)} for event in events]}
+
+    cloudtrail = MagicMock()
+    cloudtrail.lookup_events.side_effect = lookup_events
+    monkeypatch.setattr(detector_handler.lineage_mod.time, "sleep", lambda _s: None)
+    return cloudtrail, calls
+
+
+def test_federated_console_session_lineage_is_looked_up_and_cached(
+    detector_handler, base_env, monkeypatch
+):
+    monkeypatch.setenv("SESSION_LINEAGE", "true")
+    dynamodb = tracking()
+    dynamodb.update_item.side_effect = [{"Attributes": {}}, {"Attributes": {}}, {}]
+    dynamodb.get_item.return_value = {}
+    fakes = wire(detector_handler, monkeypatch, dynamodb=dynamodb)
+    cloudtrail, calls = lineage_cloudtrail(
+        monkeypatch,
+        detector_handler,
+        {
+            "ResourceName": [sample_events.ASSUME_ROLE_FOR_FEDERATED],
+            "EventName": [sample_events.CONSOLE_LOGIN_FOR_FEDERATED],
+        },
+    )
+    fakes["cloudtrail@eu-west-1"] = cloudtrail
+    fakes["cloudtrail@us-east-1"] = cloudtrail
+    event = sample_events.eventbridge_envelope(sample_events.FEDERATED_CONSOLE_MUTATION)
+    detector_handler.lambda_handler(event, None)
+
+    payload = json.loads(fakes["lambda"].invoke.call_args.kwargs["Payload"])
+    assert payload["context"]["lineage"]["signin_gap_seconds"] == 389
+    assessment = payload["context"]["assessment"]
+    assert (assessment["driver"], assessment["confidence"]) == ("ai-agent", "high")
+    signals = " ".join(item["signal"] for item in assessment["evidence"])
+    assert "session tag AccessType=AI marks an AI agent" in signals
+    assert "created 6 minutes earlier" in signals
+    assert calls == ["ResourceName", "EventName"]
+    cache_write = dynamodb.update_item.call_args_list[2].kwargs
+    assert cache_write["Key"] == {
+        "pk": {"S": "SESSION#ASIACONSOLEKEY"},
+        "sk": {"S": "LINEAGE"},
+    }
+
+
+def test_cached_lineage_skips_event_history(detector_handler, base_env, monkeypatch):
+    monkeypatch.setenv("SESSION_LINEAGE", "true")
+    dynamodb = tracking()
+    dynamodb.get_item.return_value = {
+        "Item": {"lineage": {"S": json.dumps({"signin_gap_seconds": 389})}}
+    }
+    fakes = wire(detector_handler, monkeypatch, dynamodb=dynamodb)
+    cloudtrail = MagicMock()
+    fakes["cloudtrail@eu-west-1"] = cloudtrail
+    fakes["cloudtrail@us-east-1"] = cloudtrail
+    event = sample_events.eventbridge_envelope(sample_events.FEDERATED_CONSOLE_MUTATION)
+    detector_handler.lambda_handler(event, None)
+    cloudtrail.lookup_events.assert_not_called()
+    payload = json.loads(fakes["lambda"].invoke.call_args.kwargs["Payload"])
+    assert payload["context"]["lineage"] == {"signin_gap_seconds": 389}
+
+
+def test_incomplete_recent_lineage_is_not_cached(detector_handler, base_env, monkeypatch):
+    monkeypatch.setenv("SESSION_LINEAGE", "true")
+    record = json.loads(json.dumps(sample_events.FEDERATED_CONSOLE_MUTATION))
+    now = detector_handler.time.strftime("%Y-%m-%dT%H:%M:%SZ", detector_handler.time.gmtime())
+    record["userIdentity"]["sessionContext"]["attributes"]["creationDate"] = now
+    dynamodb = tracking()
+    dynamodb.get_item.return_value = {}
+    fakes = wire(detector_handler, monkeypatch, dynamodb=dynamodb)
+    cloudtrail, _calls = lineage_cloudtrail(monkeypatch, detector_handler, {})
+    fakes["cloudtrail@eu-west-1"] = cloudtrail
+    fakes["cloudtrail@us-east-1"] = cloudtrail
+    detector_handler.lambda_handler(sample_events.eventbridge_envelope(record), None)
+    assert dynamodb.update_item.call_count == 2, "session and actor tracking only"

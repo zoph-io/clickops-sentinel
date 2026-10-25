@@ -20,9 +20,11 @@ known-first-party = [
     "email_send",
     "identity",
     "ip_intel",
+    "lineage",
     "memory",
     "messages",
     "notify",
+    "origin",
     "suppressed_actions",
     "tools",
 ]

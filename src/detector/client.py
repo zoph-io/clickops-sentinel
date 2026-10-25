@@ -56,6 +56,14 @@ IAC_TOOLS = (
 )
 SDK_OS_NAMES = {"macos": "macOS", "linux": "Linux", "windows": "Windows", "android": "Android"}
 MAX_LABEL_LENGTH = 80
+# AWS-managed MCP servers call AWS on the user's behalf and stamp invokedBy,
+# sourceIPAddress, and userAgent with their service principal.
+MCP_SERVICE_RE = re.compile(r"^([a-z0-9-]+-mcp)\.amazonaws\.com$")
+MCP_SERVER_NAMES = {
+    "aws-mcp": "AWS MCP Server",
+    "eks-mcp": "Amazon EKS MCP Server",
+    "ecs-mcp": "Amazon ECS MCP Server",
+}
 
 
 def agent_markers() -> tuple:
@@ -63,9 +71,18 @@ def agent_markers() -> tuple:
     return tuple(marker.strip().lower() for marker in raw.split(",") if marker.strip())
 
 
-def _is_agent_name(name: str) -> bool:
+def is_agent_name(name: str) -> bool:
     name = name.lower()
     return any(marker == "*" or marker in name for marker in agent_markers())
+
+
+def mcp_server(value) -> tuple[str, str]:
+    """(principal prefix, display name) of an AWS-managed MCP server, or empty strings."""
+    match = MCP_SERVICE_RE.match(str(value or "").strip())
+    if not match:
+        return "", ""
+    prefix = match.group(1)
+    return prefix, MCP_SERVER_NAMES.get(prefix, f"{prefix} MCP server")
 
 
 def _safe(value: str) -> str:
@@ -140,7 +157,7 @@ def _parse_browser(user_agent: str) -> dict:
         return _result("automated-browser", name, os_name)
     if "Electron/" in user_agent:
         app = _embedding_app(user_agent) or "Electron"
-        if _is_agent_name(app):
+        if is_agent_name(app):
             return _result("agent-browser", app, os_name, agent=app)
         return _result("embedded-browser", app, os_name)
     return _result("browser", _browser_family(user_agent), os_name)
@@ -152,7 +169,7 @@ def _parse_tool(user_agent: str) -> dict:
     app = APP_ID_RE.search(user_agent)
     app_id = _safe(app.group(1)) if app else ""
     lowered = user_agent.lower()
-    agent = app_id if app_id and _is_agent_name(app_id) else ""
+    agent = app_id if app_id and is_agent_name(app_id) else ""
     iac = next((name for marker, name in IAC_TOOLS if marker.lower() in lowered), "")
 
     # An agent applying IaC is the desired path, not drift: attributed, not alerted.
@@ -194,6 +211,11 @@ def parse(user_agent) -> dict:
         return _result("unknown")
     if user_agent.startswith("AWS Internal"):
         return _result("aws-service", "AWS Internal")
+    prefix, server = mcp_server(user_agent)
+    if server:
+        result = _result("ai-agent", server, agent=prefix)
+        result["label"] = f"AI agent via {server}"
+        return result
     if user_agent.endswith(".amazonaws.com") or user_agent.startswith("awslambda-worker"):
         return _result("aws-service", _safe(user_agent.split()[0].split("/")[0]))
     if user_agent.startswith("Mozilla/"):
@@ -237,12 +259,19 @@ def new_context(record: dict) -> dict:
 
 
 def headline(context) -> str:
-    """Alert title without the event name, for example 'AI agent change detected'."""
-    info = (context or {}).get("client")
-    console = (context or {}).get("origin", "console") == "console"
-    if is_agent(info):
+    """Alert title without the event name, for example 'AI agent change detected'.
+
+    Follows the combined origin assessment when it is at least medium
+    confidence, so AWS-asserted evidence can name an agent the user agent hides.
+    """
+    context = context or {}
+    info = context.get("client")
+    console = context.get("origin", "console") == "console"
+    assessment = context.get("assessment") or {}
+    driver = assessment.get("driver") if assessment.get("confidence") in ("medium", "high") else ""
+    if is_agent(info) or driver == "ai-agent":
         return "ClickOps by an AI agent detected" if console else "AI agent change detected"
-    if is_automated(info):
+    if is_automated(info) or driver == "automation":
         return "Automated ClickOps detected"
     return "ClickOps detected"
 

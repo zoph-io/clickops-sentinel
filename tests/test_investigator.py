@@ -315,12 +315,38 @@ def test_agent_sees_client_and_record_keeps_it(investigator_handler, base_env, m
         data["session_id"], None, None, context,
     )
     prompt = captured["user_prompt"]
-    assert prompt.startswith("Investigate this API change made by a client labelled as an AI")
+    assert prompt.startswith("Investigate this API change made by an AI agent.")
     assert "Client: AI agent cursor-agent via AWS CLI on macOS" in prompt
     assert "Client signals: first change by this actor from AI agent" in prompt
-    assert "6. Client:" in captured["system_prompt"]
+    assert "6. Who drove it:" in captured["system_prompt"]
+    assert "Driven by (deterministic assessment): AI agent, medium confidence" in prompt
+    assert "user agent app ID cursor-agent (client, strong)" in prompt
     item = fakes["dynamodb"].put_item.call_args.kwargs["Item"]
     assert item["client_kind"]["S"] == "ai-agent"
     assert item["agent"]["S"] == "cursor-agent"
+    assert item["driver"]["S"] == "ai-agent"
+    assert item["driver_confidence"]["S"] == "medium"
     assert "using AI agent cursor-agent" in saved["event_summary"]
+    assert ", driven by AI agent, medium confidence" in saved["event_summary"]
     assert saved["event_summary"].startswith("API change by")
+
+
+def test_session_behavior_joins_the_assessment(investigator_handler, base_env, monkeypatch):
+    wire(investigator_handler, monkeypatch)
+    monkeypatch.setattr(investigator_handler.budget, "tokens_used_today", lambda *args: 0)
+    steps = [
+        {"name": "GetCallerIdentity", "time": "2026-07-05T11:50:00Z", "readOnly": True},
+        {"name": "RunInstances", "time": "2026-07-05T12:00:00Z", "readOnly": False},
+    ]
+    monkeypatch.setattr(investigator_handler.tools, "session_timeline", lambda *args: steps)
+    captured = {}
+
+    def fake_run(*args):
+        captured["context"] = args[6]
+        return dict(VERDICT)
+
+    monkeypatch.setattr(investigator_handler, "run_investigation", fake_run)
+    investigator_handler.lambda_handler(payload(), None)
+    signals = [item["signal"] for item in captured["context"]["assessment"]["evidence"]]
+    assert "GetCallerIdentity in the session, a typical CLI or agent first step" in signals
+    assert "console session credentials" in signals, "detector-less payloads are assessed too"

@@ -6,6 +6,7 @@ import sample_events
 import client
 import criticality
 import email_render
+import origin
 
 VERDICT = {
     "verdict": "manual-change-confirmed",
@@ -215,6 +216,24 @@ def test_agent_api_email_titles_and_path_label():
     assert "AI agent change detected" in html
     assert "AGENT SESSION PATH" in html
     assert "AI agent cursor-agent via AWS CLI on macOS (API call, not the console)" in html
+
+
+def test_email_shows_who_drove_it_and_disagreement():
+    record = dict(
+        sample_events.FEDERATED_CONSOLE_MUTATION, userAgent=sample_events.CHROME_UA
+    )
+    context = client.new_context(record)
+    context["assessment"] = origin.assess(
+        origin.collect(record, context["client"], lineage={"signin_gap_seconds": 389})
+    )
+    email = email_render.plain_email(record, "alice", "prod", "", None, None, context)
+    assert email["subject"] == "Automated ClickOps detected: RunInstances"
+    html = email["html"]
+    assert "Automated console change detected" in html
+    assert "Driven by: Automation, medium confidence" in html
+    assert "created 6 minutes earlier" in html
+    assert "Signals disagree: the client looks like a person" in html
+    _assert_style(html)
 
 
 def test_login_email_shows_client():

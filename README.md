@@ -43,9 +43,11 @@ drive a browser in the console or call the API.
 - **Know where the click came from.** The source IP is resolved to its
   network (ISP or hosting provider) and approximate location, with VPN,
   proxy, and Tor flags when available.
-- **Catch AI agents and hijacked sessions.** Each alert says what made the
-  call: a person's browser, a browser driven by an AI agent or automation,
-  CloudShell, or a CLI labelled as an AI agent. API changes by labelled AI
+- **Catch AI agents and hijacked sessions.** Each alert says who drove the
+  change, a person, an AI agent, or other automation, with a confidence
+  level. The verdict weighs evidence AWS records itself (a console session
+  opened from CLI credentials, AWS MCP Server calls, source identity,
+  session tags, MFA) above the self-reported user agent. API changes by AI
   agents are alerted like console changes, and a session that switches
   browser or country mid-session is flagged as a likely stolen session.
 - **Hard to evade from the console.** Console detection relies on a flag
@@ -133,16 +135,19 @@ well as, email, see [Slack and Microsoft Teams setup](#slack-and-microsoft-teams
 1. **Detect.** CloudTrail emits every management write event to the
    EventBridge default bus, free of charge. A rule matches events where
    `sessionCredentialFromConsole` is true and `readOnly` is false, which
-   means a mutating action made with console credentials. A second rule
-   matches API write events whose user agent carries an app ID, for
-   [AI agents](#clients-and-ai-agents) that label themselves.
+   means a mutating action made with console credentials. Two more rules
+   match API write events whose user agent carries an app ID, for
+   [AI agents](#clients-and-ai-agents) that label themselves, and changes
+   made through AWS-managed MCP servers.
 2. **Filter and rate.** The detector Lambda drops known console noise,
    deduplicates (EventBridge delivers at least once), rates the change
    against the [criticality catalog](#criticality-scale-and-catalog), looks
    up the [source IP](#source-ip-enrichment), compares the
    [client](#clients-and-ai-agents) with the rest of the session and the
-   actor's history, and starts at most one investigation per session every
-   30 minutes. Critical changes and session anomalies skip that cooldown.
+   actor's history, weighs
+   [who drove the change](#who-drove-it-person-ai-agent-or-automation), and
+   starts at most one investigation per session every 30 minutes. Critical
+   changes and session anomalies skip that cooldown.
 3. **Investigate.** The investigator Lambda runs a small Claude agent loop
    on the Bedrock Converse API. Using read-only tools, it replays the session
    from CloudTrail Event History, looks at adjacent activity from the same
@@ -156,10 +161,13 @@ well as, email, see [Slack and Microsoft Teams setup](#slack-and-microsoft-teams
 flowchart LR
     Console[AWS Console action] --> CT[CloudTrail management event]
     Agent[AI agent API call with app ID] --> CT
+    MCP[AWS-managed MCP server call] --> CT
     CT --> EB[EventBridge default bus rules]
     EB -->|"sessionCredentialFromConsole=true, readOnly=false"| DET[Detector Lambda]
     EB -->|"userAgent app/*, readOnly=false"| DET
+    EB -->|"invokedBy *-mcp.amazonaws.com"| DET
     DET <-->|session and actor clients| DDB[DynamoDB]
+    DET <-->|session lineage, once per session| CTH
     DET -->|suppressed or duplicate| Drop[Ignore]
     DET <-->|source IP| IPI[IP lookup provider]
     DET -->|async invoke| INV[Investigator Lambda, Claude agent]
@@ -199,8 +207,9 @@ the same IP, consults its long-term memory about the actor, and produces:
 - the source network and approximate location, compared with the rest of
   the session and the actor's usual networks
 - the client that made the call (browser, AI agent, automation, CloudShell),
-  whether a human appears to have directed an AI agent, and any session
-  anomaly such as a browser or country switch
+  who drove the change with the evidence for it, whether a human appears to
+  have directed an AI agent, and any session anomaly such as a browser or
+  country switch
 - FinOps implications with a cost impact rating and rough monthly dollar
   range: instance launches, provisioned capacity, perpetual-billing
   resources, and also savings
@@ -337,7 +346,98 @@ Mac, or a sudden AI agent) is noted on the alert and given to the agent.
 Know the limits: the user agent is self-reported. An agent marker is
 evidence that an agent was involved, but an ordinary browser does not prove
 a human: an agent driving a person's own browser looks exactly like them,
-and an agent that does not set an app ID through the API is not seen.
+and an agent that does not set an app ID through the API is not seen. That
+is why the user agent is only one input to the next section.
+
+### Who drove it: person, AI agent, or automation
+
+Each alert carries a verdict, such as `Driven by: AI agent, high
+confidence`, with the evidence behind it. The verdict mixes independent
+signals. Signals AWS records itself outweigh what the client says about
+itself:
+
+| Signal | Recorded by | Points to |
+| --- | --- | --- |
+| Call made through an AWS-managed MCP server (`invokedBy`) | AWS | AI agent |
+| Session tag or source identity naming an agent, role listed in `AgentRoleNames` | AWS | AI agent |
+| Role session name naming an agent (`cursor-agent`) | AWS | AI agent |
+| Console session opened from credentials created earlier (see below) | AWS | automation |
+| Long-term IAM user access key | AWS | automation |
+| Cloud or hosting source network (AWS, Google Cloud, Azure, Hetzner, ...) | AWS | automation: a cloud agent, CI, or a VPN |
+| MFA on the session or when the role was assumed, a source identity naming a person | AWS | person |
+| Agent browser, app ID, headless or automated browser | client | AI agent or automation |
+| Ordinary browser, CloudShell | client | person, weakly |
+| In the session retrace: `GetCallerIdentity`, failing calls retried until they pass, console pages browsed before the change | AWS | agent, automation, or person, weakly |
+
+Machine-driven evidence adds up against human evidence. The verdict is AI
+agent when an agent is named, automation otherwise. A person is never rated
+high confidence on a browser and a console session alone, since an agent
+can drive the user's own browser. It takes MFA or a source identity to get
+there. When the client looks like a person but AWS-recorded evidence says
+otherwise, the alert says so (`Signals disagree: ...`). The titles follow
+the verdict, so an agent hidden behind an ordinary browser still gets an
+agent or automation title.
+
+**Console sessions opened from CLI credentials.** When a person signs in to
+the console, AWS creates the session's credentials at that moment. An agent
+that wants the console turns its existing CLI credentials into a sign-in
+link (`GetSigninToken`), and the console session keeps the creation date and
+name of those credentials. On a test account, people's sign-ins came 0 to 1
+second after their credentials were created, and an agent's sign-ins came 6
+minutes and 5.5 hours after. Stolen access keys turned into a console session
+look the same, and so does a console helper that reuses cached credentials
+(such as `aws-vault login`), which is why this signal is medium strength.
+The detector looks up the sign-in and the `AssumeRole` call behind each
+session once, in CloudTrail Event History (free, at most four lookups), and
+caches the result for the session. The `AssumeRole` call also gives the
+session tags, MFA, and the client that minted the credentials. Event
+History lags a few minutes, so the first change of a brand-new session may
+lack this evidence; later changes get it.
+
+**Label your agents.** From least to most setup, and from weakest to
+strongest evidence:
+
+1. `export AWS_SDK_UA_APP_ID=cursor-agent` in the agent's environment (client
+   evidence, see above).
+2. Give the agent its own AWS profile with an agent session name. No IAM
+   change needed; the role trust policy can enforce it with an
+   `sts:RoleSessionName` condition:
+
+   ```ini
+   [profile agent]
+   role_arn = arn:aws:iam::123456789012:role/admin
+   source_profile = default
+   role_session_name = cursor-agent
+   ```
+
+3. Set a source identity. AWS stamps it on every event of the session, it
+   survives role chaining, and the session cannot change it. The role trust
+   policy must allow `sts:SetSourceIdentity`, and can require it with a
+   condition such as `"StringLike": {"sts:SourceIdentity": "*-agent"}`:
+
+   ```ini
+   [profile agent]
+   credential_process = aws sts assume-role --profile default --role-arn arn:aws:iam::123456789012:role/admin --role-session-name cursor-agent --source-identity cursor-agent --query "Credentials.{Version:`1`,AccessKeyId:AccessKeyId,SecretAccessKey:SecretAccessKey,SessionToken:SessionToken,Expiration:Expiration}" --output json
+   ```
+
+   Add `--tags Key=AccessType,Value=AI` for a session tag (the trust policy
+   must allow `sts:TagSession`).
+4. Give agents a dedicated role and list it in `AgentRoleNames`.
+
+**AWS-managed MCP servers.** The AWS, EKS, and ECS MCP servers call AWS on
+the user's behalf, and AWS records them in `invokedBy`, so these changes are
+attributed to an AI agent with high confidence. A third EventBridge rule
+forwards them (`WatchAgentApiChanges`). CloudTrail logs them as data
+events, which only reach EventBridge when a trail logs data events for
+them; see
+[Logging AWS MCP Server API calls](https://docs.aws.amazon.com/agent-toolkit/latest/userguide/logging-using-cloudtrail.html).
+To block such changes outright, deny them in an SCP with the
+`aws:ViaAWSMCPService` condition key.
+
+The investigator receives the verdict and its evidence, confirms or
+challenges it with the session retrace, and says whether a person appears to
+have directed an agent. Investigation records keep the verdict for
+`make stats`.
 
 ### How ClickOps Sentinel compares
 
@@ -479,8 +579,9 @@ Changes made by one console session are grouped into the same message thread.
 | `CriticalityOverrides` | empty | Comma-separated `service:Action=level` re-ratings of the [criticality catalog](#criticality-scale-and-catalog). |
 | `IpLookupProvider` | `ipinfo` | [Source IP enrichment](#source-ip-enrichment): `ipinfo` or `none`. |
 | `IpLookupTokenParam` | empty | Optional SSM SecureString parameter holding an ipinfo.io token. |
-| `WatchAgentApiChanges` | `true` | Also alert on API changes by [AI agents](#clients-and-ai-agents) that set an app ID. |
-| `AgentAppIds` | common agent names | Comma-separated markers matched against app IDs and embedded browser apps. `*` treats every app ID as an agent. |
+| `WatchAgentApiChanges` | `true` | Also alert on API changes by [AI agents](#clients-and-ai-agents) that set an app ID, and on changes through AWS-managed MCP servers. |
+| `AgentAppIds` | common agent names | Comma-separated markers matched against app IDs, embedded browser apps, source identities, role session names, and session tags (never against email addresses). `*` treats every app ID as an agent. |
+| `AgentRoleNames` | empty | Comma-separated IAM role names, or parts of names, reserved for AI agents. Their sessions count as strong evidence of an agent. |
 | `AccountFriendlyName` | empty | Account name in alerts. Empty resolves the IAM account alias. |
 | `LambdaMemorySize` | `128` | Detector Lambda memory. |
 | `PermissionsBoundaryArn` | empty | Permissions boundary applied to all created IAM roles. |
@@ -514,7 +615,7 @@ volume at these rates fits within the free tier of every supported provider.
 
 Every investigation writes a structured record (actor, action, verdict,
 purpose, security severity, catalog rule, source country and network,
-client and AI agent, cost impact, tokens) to DynamoDB, retained for
+client and AI agent, who drove it, cost impact, tokens) to DynamoDB, retained for
 `MemoryRetentionDays`. This is also a reviewable audit record of break-glass
 console activity that can later be codified in IaC or reverted.
 
@@ -523,8 +624,8 @@ make stats DAYS=30
 ```
 
 prints investigation counts, top actors, verdict and severity breakdowns,
-catalog rules matched, source countries and networks, clients and AI
-agents, cost impact distribution, and total token spend.
+catalog rules matched, source countries and networks, clients, AI agents,
+who drove the changes, cost impact distribution, and total token spend.
 
 ## Detection scope and trade-offs
 
@@ -539,11 +640,13 @@ Know the limits:
 - Manual CLI and SDK actions are out of scope by design. A user running
   `aws ec2 run-instances` from a laptop is manual too, but carries no
   console flag. Catching that class requires federation conventions
-  (session names set to emails) outside this tool's scope. The exception is
-  AI agents that label themselves with an app ID (see
-  [Clients and AI agents](#clients-and-ai-agents)).
+  (session names set to emails) outside this tool's scope. The exceptions
+  are AI agents that label themselves with an app ID, and changes through
+  AWS-managed MCP servers (see [Clients and AI agents](#clients-and-ai-agents)).
 - Data events (S3 object uploads, Lambda console test invokes, DynamoDB
-  item edits) never reach the EventBridge default bus and are not detected.
+  item edits) only reach the EventBridge default bus when a trail logs them,
+  and are not detected by default. The same goes for AWS-managed MCP server
+  calls.
 - Read-only console browsing is not alerted on.
 - Regional scope: management events arrive on the default bus of the region
   where the call happened. Deploy the stack to each region you use. Deploy
@@ -609,6 +712,14 @@ make deploy REGION=eu-west-1
   `--debug` and check that the `User-Agent` header contains `app/<id>`, that
   the ID matches a marker in `AgentAppIds`, and that `WatchAgentApiChanges`
   is `true`. Read-only calls are never alerted.
+- Changes through the AWS MCP Server are not alerted: they are data events,
+  so check that your trail logs data events for the AWS MCP Server in the
+  deployed region.
+- An alert lacks the console sign-in or `AssumeRole` evidence: CloudTrail
+  Event History lags a few minutes, so the first change of a new session
+  can arrive before its sign-in is searchable; later changes in the session
+  retry. Sign-ins are searched in us-east-1 and the event's region. Check
+  the detector logs for `session lineage lookup failed`.
 - A rating that does not fit your environment: re-rate the action with
   `CriticalityOverrides`, and consider opening an issue if the default is
   wrong for everyone.

@@ -15,6 +15,7 @@ SHARED = (
     "email_secret.py",
     "email_send.py",
     "ip_intel.py",
+    "origin.py",
 )
 
 

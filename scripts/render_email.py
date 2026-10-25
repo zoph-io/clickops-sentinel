@@ -19,6 +19,7 @@ import sample_events  # noqa: E402
 import client  # noqa: E402
 import criticality  # noqa: E402
 import email_render  # noqa: E402
+import origin  # noqa: E402
 
 VERDICT = {
     "verdict": "manual-change-confirmed",
@@ -52,22 +53,35 @@ def main() -> None:
     record = dict(sample_events.BROWSER_MUTATION)
     ip_info = sample_events.IP_INFO
     steps = email_render.mark_highlighted_step(SESSION_STEPS, record)
+    enriched_context = client.new_context(record)
+    enriched_context["assessment"] = origin.assess(
+        origin.collect(record, enriched_context["client"], ip_info, {"signin_gap_seconds": 1})
+    )
     enriched = email_render.enriched_email(
         record, "alice@example.com", "prod (123456789012)", VERDICT, steps,
         criticality.classify(record, overrides="", stack_name=""), ip_info,
-        client.new_context(record),
+        enriched_context,
     )
-    # An AI agent browser opening SSH, in a session that just changed country.
-    exposure = {**sample_events.SG_OPEN_SSH, "userAgent": sample_events.CURSOR_UA}
+    # An ordinary browser opening SSH in a console session opened from CLI
+    # credentials, from a hosting network, after the country changed.
+    exposure = {
+        **sample_events.SG_OPEN_SSH,
+        "userAgent": sample_events.CHROME_UA,
+        "userIdentity": sample_events.FEDERATED_CONSOLE_MUTATION["userIdentity"],
+    }
+    exposure_ip = {**ip_info, "asn": "AS16509", "isp": "Amazon.com, Inc.", "flags": ["hosting"]}
     context = client.new_context(exposure)
     context["anomalies"] = ["source country changed mid-session: FR to US"]
+    context["assessment"] = origin.assess(
+        origin.collect(exposure, context["client"], exposure_ip, {"signin_gap_seconds": 389})
+    )
     plain = email_render.plain_email(
         exposure, "alice@example.com", "prod (123456789012)",
         "AI investigation unavailable, plain alert.",
         criticality.apply_session_anomalies(
             criticality.classify(exposure, overrides="", stack_name=""), context["anomalies"]
         ),
-        {**ip_info, "flags": ["vpn", "hosting"]},
+        exposure_ip,
         context,
     )
     login = email_render.login_email(

@@ -129,6 +129,15 @@ def test_agent_applying_iac_is_attributed_but_not_an_agent_change():
     assert not client.is_agent(info)
 
 
+def test_aws_managed_mcp_servers_are_ai_agents():
+    info = client.parse("aws-mcp.amazonaws.com")
+    assert (info["kind"], info["agent"]) == ("ai-agent", "aws-mcp")
+    assert client.describe(info) == "AI agent via AWS MCP Server"
+    assert client.mcp_server("eks-mcp.amazonaws.com") == ("eks-mcp", "Amazon EKS MCP Server")
+    assert client.mcp_server("cloudformation.amazonaws.com") == ("", "")
+    assert client.parse("cloudformation.amazonaws.com")["kind"] == "aws-service"
+
+
 def test_agent_markers_are_configurable(monkeypatch):
     monkeypatch.setenv("AGENT_APP_IDS", "my-bot")
     assert client.parse(sample_events.AGENT_CLI_UA)["kind"] == "cli"

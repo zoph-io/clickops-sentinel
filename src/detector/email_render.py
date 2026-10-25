@@ -15,6 +15,7 @@ import html
 import client as client_mod
 import criticality
 import ip_intel
+import origin
 
 DARK = "#0f1420"
 BRAND_COLOR = "#7dd3fc"
@@ -192,6 +193,24 @@ def _who_block(
             '<div style="color:#92400e;font-size:11px;margin-top:2px;">'
             f"Note: {_esc(observation)}</div>"
         )
+    assessment = (context or {}).get("assessment")
+    if assessment and assessment.get("evidence"):
+        machine = assessment.get("driver") in ("ai-agent", "automation")
+        color = "#92400e" if machine else MUTED
+        client_html += (
+            f'<div style="color:{color};font-size:12px;font-weight:700;margin-top:6px;">'
+            f"Driven by: {_esc(origin.describe(assessment))}</div>"
+        )
+        for line in origin.evidence_lines(assessment):
+            client_html += (
+                f'<div style="color:{MUTED};font-size:11px;margin-top:1px;">'
+                f"&middot; {_esc(line)}</div>"
+            )
+        if assessment.get("conflict"):
+            client_html += (
+                '<div style="color:#991b1b;font-size:11px;font-weight:700;margin-top:2px;">'
+                f"Signals disagree: {_esc(assessment['conflict'])}</div>"
+            )
     return (
         '<tr><td style="padding:18px 24px 4px 24px;">'
         f'<div style="color:{DARK};font-size:14px;"><b>{_esc(who)}</b></div>'
@@ -203,13 +222,11 @@ def _who_block(
 
 
 def _header_title(context: dict | None) -> str:
-    info = (context or {}).get("client")
-    console = (context or {}).get("origin", "console") == "console"
-    if client_mod.is_agent(info):
-        return "Console change by an AI agent" if console else "AI agent change detected"
-    if client_mod.is_automated(info):
-        return "Automated console change detected"
-    return "Manual console change detected"
+    return {
+        "ClickOps by an AI agent detected": "Console change by an AI agent",
+        "AI agent change detected": "AI agent change detected",
+        "Automated ClickOps detected": "Automated console change detected",
+    }.get(client_mod.headline(context), "Manual console change detected")
 
 
 def _card(label: str, value: str, detail: str, background: str, color: str) -> str:

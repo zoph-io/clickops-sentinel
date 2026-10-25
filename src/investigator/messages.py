@@ -10,6 +10,7 @@ import json
 import client as client_mod
 import criticality
 import ip_intel
+import origin
 
 SEVERITY_LABELS = {
     "none": "none",
@@ -77,6 +78,7 @@ def _base_fields(
         signals = client_mod.signal_lines(context)
         if signals:
             fields.append(("Client signals", "; ".join(signals)))
+        fields.extend(origin.fields(context.get("assessment")))
     if record.get("errorCode"):
         fields.append(("Result", f"failed ({record['errorCode']})"))
     return fields

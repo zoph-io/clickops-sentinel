@@ -85,6 +85,59 @@ AGENT_BROWSER_MUTATION = {
     "userAgent": CURSOR_UA,
 }
 
+# A console session opened from CLI credentials (GetSigninToken), as the
+# Cursor agent browser did: the CLI's session name and its creation date.
+FEDERATED_ROLE_ARN = "arn:aws:iam::123456789012:role/admin"
+FEDERATED_SESSION_ARN = "arn:aws:sts::123456789012:assumed-role/admin/botocore-session-1792740938"
+FEDERATED_CONSOLE_MUTATION = {
+    **copy.deepcopy(CONSOLE_MUTATION),
+    "eventID": "26262626-2626-2626-2626-262626262626",
+    "eventTime": "2026-07-05T13:02:36Z",
+    "awsRegion": "eu-west-1",
+    "userAgent": CURSOR_UA,
+    "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "AROAEXAMPLE:botocore-session-1792740938",
+        "arn": FEDERATED_SESSION_ARN,
+        "accountId": "123456789012",
+        "accessKeyId": "ASIACONSOLEKEY",
+        "sessionContext": {
+            "sessionIssuer": {"type": "Role", "arn": FEDERATED_ROLE_ARN, "userName": "admin"},
+            "attributes": {"creationDate": "2026-07-05T07:35:38Z", "mfaAuthenticated": "false"},
+        },
+    },
+}
+ASSUME_ROLE_FOR_FEDERATED = {
+    "eventName": "AssumeRole",
+    "eventTime": "2026-07-05T07:35:38Z",
+    "userAgent": AGENT_CLI_UA,
+    "requestParameters": {
+        "roleArn": FEDERATED_ROLE_ARN,
+        "roleSessionName": "botocore-session-1792740938",
+        "tags": [{"key": "AccessType", "value": "AI"}],
+    },
+    "responseElements": {"assumedRoleUser": {"arn": FEDERATED_SESSION_ARN}},
+}
+CONSOLE_LOGIN_FOR_FEDERATED = {
+    "eventName": "ConsoleLogin",
+    "eventTime": "2026-07-05T07:42:07Z",
+    "userIdentity": {"arn": FEDERATED_SESSION_ARN},
+}
+
+# A change the AWS MCP Server made on the user's behalf.
+MCP_MUTATION = {
+    **copy.deepcopy(CLI_MUTATION),
+    "eventID": "27272727-2727-2727-2727-272727272727",
+    "eventName": "AuthorizeSecurityGroupIngress",
+    "sourceIPAddress": "aws-mcp.amazonaws.com",
+    "userAgent": "aws-mcp.amazonaws.com",
+    "eventCategory": "Data",
+}
+MCP_MUTATION["userIdentity"] = {
+    **copy.deepcopy(CONSOLE_MUTATION["userIdentity"]),
+    "invokedBy": "aws-mcp.amazonaws.com",
+}
+
 CONSOLE_READONLY = {
     **copy.deepcopy(CONSOLE_MUTATION),
     "eventID": "33333333-3333-3333-3333-333333333333",

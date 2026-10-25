@@ -25,6 +25,7 @@ import email_send
 import ip_intel
 import memory
 import messages
+import origin
 import tools
 
 logger = logging.getLogger()
@@ -78,15 +79,23 @@ evidence-based judgment. Think about:
    (NAT gateways, load balancers, elastic IPs, VPC endpoints), storage
    growth. Estimate a rough monthly dollar range when the parameters allow.
    Terminating or downsizing resources is a saving, report it positively.
-6. Client: the user agent tells what made the call: a browser, a browser
-   driven by an AI agent or automation, CloudShell, a CLI or SDK labelled as
-   an AI agent, or an IaC tool. It is self-reported, so an agent marker is
-   evidence an agent was involved, but an ordinary browser does not prove a
-   human: an agent can drive the user's own browser. An AI agent changing
-   infrastructure outside IaC is drift like any console change; say whether
-   a human appears to have directed it. A session that switches browser or
-   country mid-session suggests a stolen session cookie or credentials
-   replayed elsewhere. Session events carry their client.
+6. Who drove it: you receive a deterministic assessment (person, AI agent,
+   or automation, with a confidence level) and the evidence behind it.
+   AWS-asserted evidence outweighs client-reported evidence. The user agent
+   is self-reported: an agent marker is evidence an agent was involved, but
+   an ordinary browser does not prove a person, since an agent can drive the
+   user's own browser. AWS-asserted signals include a console session opened
+   from CLI or SDK credentials (an agent, a console helper, or stolen keys),
+   calls through an AWS-managed MCP server, source identity, session tags,
+   long-term access keys, MFA, and a cloud or hosting source network. In the
+   session retrace, agents tend to start with GetCallerIdentity and retry
+   failing calls; people browse console pages before changing something.
+   Confirm or challenge the assessment with what you find, and say whether a
+   person appears to have directed an agent. An AI agent changing
+   infrastructure outside IaC is drift like any console change. A session
+   that switches browser or country mid-session suggests a stolen session
+   cookie or credentials replayed elsewhere. Session events carry their
+   client.
 7. History: use get_actor_memory to check whether this actor has prior
    verdicts or known patterns, including the networks, countries, and
    clients they usually work from.
@@ -289,6 +298,10 @@ def _write_investigation_record(
         item["agent"] = {"S": info["agent"]}
     if (context or {}).get("anomalies"):
         item["session_anomalies"] = {"N": str(len(context["anomalies"]))}
+    assessment = (context or {}).get("assessment") or {}
+    if assessment.get("driver"):
+        item["driver"] = {"S": assessment["driver"]}
+        item["driver_confidence"] = {"S": assessment.get("confidence", "low")}
     try:
         _client("dynamodb").put_item(TableName=os.environ["TABLE_NAME"], Item=item)
     except Exception as error:  # noqa: BLE001 statistics are best-effort
@@ -311,10 +324,14 @@ def _build_user_prompt(
         catalog = "no catalog match, rate it from the scale"
     context = context or client_mod.new_context(record)
     if context["origin"] == "api":
-        opening = "Investigate this API change made by a client labelled as an AI agent."
+        opening = "Investigate this API change made by an AI agent."
     else:
         opening = "Investigate this manual console change."
     signals = "; ".join(client_mod.signal_lines(context)) or "none"
+    assessment = context.get("assessment")
+    driven_by = origin.describe(assessment) or "not assessed"
+    evidence = "; ".join(origin.evidence_lines(assessment, limit=8)) or "none"
+    conflict = (assessment or {}).get("conflict") or "none"
     return (
         f"{opening}\n\n"
         f"Event: {json.dumps(event_summary, default=str)}\n"
@@ -325,6 +342,9 @@ def _build_user_prompt(
         f"Source network: {ip_intel.describe(ip_info) or 'unavailable'}\n"
         f"Client: {client_mod.describe(context['client']) or 'unknown'}\n"
         f"Client signals: {signals}\n"
+        f"Driven by (deterministic assessment): {driven_by}\n"
+        f"Assessment evidence: {evidence}\n"
+        f"Signals disagree: {conflict}\n"
         f"Suggested lookback window: {lookback} hours.\n"
         f"Session access key for retrace: {event_summary.get('accessKeyId') or 'unknown'}"
     )
@@ -387,6 +407,10 @@ def run_investigation(
 
     if context is None:
         context = client_mod.new_context(record)
+    if not context.get("assessment"):
+        context["assessment"] = origin.assess(
+            origin.collect(record, context["client"], ip_info, context.get("lineage"))
+        )
     if rating is None:
         rating = criticality.apply_session_anomalies(
             criticality.classify(record), context["anomalies"]
@@ -419,18 +443,20 @@ def run_investigation(
     _write_investigation_record(record, identity, verdict, usage, rating, ip_info, context)
     source = ip_intel.describe(ip_info)
     client_line = client_mod.describe(context["client"])
-    origin = "Console change" if context["origin"] == "console" else "API change"
+    driven_by = origin.describe(context.get("assessment"))
+    change = "Console change" if context["origin"] == "console" else "API change"
     memory.save_investigation(
         memory_client=_client("bedrock-agentcore"),
         memory_id=memory_id,
         actor_id=identity["actor_id"],
         session_id=session_id,
         event_summary=(
-            f"{origin} by {identity.get('display')}: "
+            f"{change} by {identity.get('display')}: "
             f"{record.get('eventSource')}:{record.get('eventName')} "
             f"in {record.get('awsRegion')} at {record.get('eventTime')}"
             + (f" from {record.get('sourceIPAddress')} ({source})" if source else "")
             + (f" using {client_line}" if client_line else "")
+            + (f", driven by {driven_by}" if driven_by else "")
             + (f". Catalog rule {rating['rule_id']} ({rating['level']})" if rating else "")
         ),
         verdict_summary=(
@@ -464,6 +490,10 @@ def lambda_handler(event: dict, context) -> dict:
         ip_info = event["ip_info"]
     else:
         ip_info = ip_intel.lookup(record.get("sourceIPAddress"))
+    if not context.get("assessment"):
+        context["assessment"] = origin.assess(
+            origin.collect(record, context["client"], ip_info, context.get("lineage"))
+        )
     who = identity["display"]
 
     def publish_plain(note: str) -> None:
@@ -515,6 +545,11 @@ def lambda_handler(event: dict, context) -> dict:
         log_decision(event_id, "budget-exhausted", tokens_used=used)
         return {"decision": "budget-exhausted"}
 
+    steps = _session_steps(record, session_id)
+    behavior = origin.behavior_evidence(steps, record)
+    if behavior:
+        context["assessment"] = origin.assess(context["assessment"]["evidence"] + behavior)
+
     try:
         verdict = run_investigation(
             record, identity, account_label, session_id, rating, ip_info, context
@@ -533,7 +568,6 @@ def lambda_handler(event: dict, context) -> dict:
     )
     _publish(alert, session_id)
     if email_send.email_enabled():
-        steps = _session_steps(record, session_id)
         _send_email(
             email_render.enriched_email(
                 record, who, account_label, verdict, steps, rating, ip_info, context
@@ -548,6 +582,8 @@ def lambda_handler(event: dict, context) -> dict:
         criticality_rule=rating["rule_id"] if rating else "",
         client=context["client"].get("kind", ""),
         agent=context["client"].get("agent", ""),
+        driver=context["assessment"]["driver"],
+        confidence=context["assessment"]["confidence"],
         cost=verdict.get("cost_impact"),
     )
     return {"decision": "notified-enriched", "verdict": verdict.get("verdict")}

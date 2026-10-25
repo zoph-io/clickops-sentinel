@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Detector Lambda.
 
-Receives CloudTrail management events from the EventBridge default bus:
-console changes, and API changes by clients labelled as AI agents. Filters
-out noise, deduplicates, extracts the human identity, tracks the client per
-session and per actor, and either hands off to the investigator Lambda (AI
-path) or publishes a plain notification directly.
+Receives CloudTrail events from the EventBridge default bus: console
+changes, API changes by clients labelled as AI agents, and changes made
+through AWS-managed MCP servers. Filters out noise, deduplicates, extracts
+the human identity, tracks the client per session and per actor, weighs who
+drove the change, and either hands off to the investigator Lambda (AI path)
+or publishes a plain notification directly.
 """
 
 import json
@@ -22,7 +23,9 @@ import email_render
 import email_send
 import identity as identity_mod
 import ip_intel
+import lineage as lineage_mod
 import notify
+import origin
 import suppressed_actions as sup
 
 logger = logging.getLogger()
@@ -37,8 +40,10 @@ _account_alias_cache: list = []
 
 
 def _client(name: str):
+    """name is a service, or service@region for a client pinned to a region."""
     if name not in _clients:
-        _clients[name] = boto3.client(name)
+        service, _, region = name.partition("@")
+        _clients[name] = boto3.client(service, region_name=region or None)
     return _clients[name]
 
 
@@ -132,22 +137,24 @@ def extract_session_id(record: dict) -> str:
 def is_watched_change(record: dict) -> tuple[bool, str]:
     """Re-check the EventBridge rule conditions, defense in depth.
 
-    Watched: console changes, and API changes whose user agent carries an AI
-    agent app ID (AWS_SDK_UA_APP_ID) when agent API watching is enabled.
+    Watched: console changes, and when agent API watching is enabled, API
+    changes whose user agent carries an AI agent app ID (AWS_SDK_UA_APP_ID)
+    and changes made through an AWS-managed MCP server.
     """
     from_console = record.get("sessionCredentialFromConsole") in (True, "true")
+    invoked_by = (record.get("userIdentity") or {}).get("invokedBy")
+    via_mcp = bool(client_mod.mcp_server(invoked_by)[1])
     agent_api = (
         not from_console
         and os.environ.get("AGENT_API_CHANGES", "true") == "true"
-        and client_mod.parse(record.get("userAgent"))["kind"] == "ai-agent"
+        and (via_mcp or client_mod.parse(record.get("userAgent"))["kind"] == "ai-agent")
     )
     if not from_console and not agent_api:
         return False, "not a console session or a labelled AI agent"
     read_only = record.get("readOnly")
     if read_only in (True, "true"):
         return False, "read-only event"
-    invoked_by = (record.get("userIdentity") or {}).get("invokedBy")
-    if invoked_by:
+    if invoked_by and not via_mcp:
         return False, f"invoked by service {invoked_by}"
     return True, ""
 
@@ -236,6 +243,49 @@ def track_client(session_id: str, actor_id: str, context: dict, ip_info: dict | 
         logger.warning("actor client tracking failed: %s", error)
 
 
+def session_lineage(session_id: str, record: dict) -> dict:
+    """How the session's credentials were obtained, looked up once per session.
+
+    Event history lags a few minutes, so an incomplete result is cached only
+    once the session is old enough for the lag to be over.
+    """
+    if os.environ.get("SESSION_LINEAGE", "true") != "true":
+        return {}
+    if (record.get("userIdentity") or {}).get("type") != "AssumedRole":
+        return {}
+    key = {"pk": {"S": f"SESSION#{session_id}"}, "sk": {"S": "LINEAGE"}}
+    dynamodb = _client("dynamodb")
+    try:
+        cached = dynamodb.get_item(TableName=_table_name(), Key=key)
+        item = cached.get("Item") if isinstance(cached, dict) else None
+        if isinstance(item, dict) and isinstance(item.get("lineage"), dict):
+            return json.loads(item["lineage"].get("S") or "{}")
+    except Exception as error:  # noqa: BLE001 lineage is best-effort
+        logger.warning("session lineage cache read failed: %s", error)
+
+    result = lineage_mod.lookup(record, lambda region: _client(f"cloudtrail@{region}"))
+    attributes = ((record.get("userIdentity") or {}).get("sessionContext") or {}).get(
+        "attributes"
+    ) or {}
+    created = origin.parse_time(attributes.get("creationDate"))
+    settled = created is not None and time.time() - created.timestamp() > 1800
+    if lineage_mod.complete(record, result) or settled:
+        try:
+            dynamodb.update_item(
+                TableName=_table_name(),
+                Key=key,
+                UpdateExpression="SET #l = :l, #t = :t",
+                ExpressionAttributeNames={"#l": "lineage", "#t": "ttl"},
+                ExpressionAttributeValues={
+                    ":l": {"S": json.dumps(result)},
+                    ":t": {"N": str(int(time.time()) + SESSION_CLIENT_TTL_SECONDS)},
+                },
+            )
+        except Exception as error:  # noqa: BLE001 lineage is best-effort
+            logger.warning("session lineage cache write failed: %s", error)
+    return result
+
+
 def _publish_chat(alert: dict, thread_id: str) -> None:
     notify.publish(
         sns_client=_client("sns"),
@@ -317,6 +367,10 @@ def handle_change(record: dict) -> dict:
     context = client_mod.new_context(record)
     ip_info = ip_intel.lookup(record.get("sourceIPAddress"))
     track_client(session_id, who["actor_id"], context, ip_info)
+    context["lineage"] = session_lineage(session_id, record)
+    context["assessment"] = origin.assess(
+        origin.collect(record, context["client"], ip_info, context["lineage"])
+    )
     rating = criticality.apply_session_anomalies(
         criticality.classify(record), context["anomalies"]
     )
@@ -328,6 +382,8 @@ def handle_change(record: dict) -> dict:
         "origin": context["origin"],
         "client": context["client"]["kind"],
         "agent": context["client"]["agent"],
+        "driver": context["assessment"]["driver"],
+        "confidence": context["assessment"]["confidence"],
         "anomalies": len(context["anomalies"]),
     }
 
