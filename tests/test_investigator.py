@@ -6,6 +6,8 @@ from unittest.mock import MagicMock
 
 import sample_events
 
+import client
+
 VERDICT = {
     "verdict": "suspicious",
     "confidence": "medium",
@@ -128,7 +130,7 @@ def test_payload_ip_info_is_used_without_a_second_lookup(
     monkeypatch.setattr(investigator_handler.ip_intel, "lookup", lookup)
     seen = {}
 
-    def fake_run(record, identity, account_label, session_id, rating, ip_info):
+    def fake_run(record, identity, account_label, session_id, rating, ip_info, context):
         seen.update(rating=rating, ip_info=ip_info)
         return dict(VERDICT)
 
@@ -246,3 +248,105 @@ def test_run_investigation_consumes_budget_and_records(
     assert "suspicious" in saved["verdict_summary"]
     # Token metrics published.
     fakes["cloudwatch"].put_metric_data.assert_called_once()
+
+
+def agent_context(anomalies=(), observations=()):
+    context = client.new_context(sample_events.AGENT_API_MUTATION)
+    context["anomalies"] = list(anomalies)
+    context["observations"] = list(observations)
+    return context
+
+
+def test_agent_api_change_is_reported_as_an_agent_change(
+    investigator_handler, base_env, monkeypatch
+):
+    fakes = wire(investigator_handler, monkeypatch)
+    monkeypatch.setattr(investigator_handler.budget, "tokens_used_today", lambda *args: 0)
+    monkeypatch.setattr(
+        investigator_handler, "run_investigation", lambda *args: dict(VERDICT)
+    )
+    data = {
+        **payload(),
+        "record": dict(sample_events.AGENT_API_MUTATION),
+        "context": agent_context(),
+    }
+    investigator_handler.lambda_handler(data, None)
+    content = chat_payloads(fakes["sns"])[0]["content"]
+    assert content["title"] == "[HIGH] AI agent change detected: RunInstances"
+    assert "*Origin*: API call, not the console" in content["description"]
+    assert "*Client*: AI agent cursor-agent via AWS CLI on macOS" in content["description"]
+    subject, html, _text = fakes["email"].call_args.args
+    assert subject == "[HIGH] AI agent change detected: RunInstances"
+    assert "AGENT SESSION PATH" in html
+
+
+def test_session_anomaly_from_the_detector_raises_the_plain_rating(
+    investigator_handler, base_env, monkeypatch
+):
+    fakes = wire(investigator_handler, monkeypatch)
+    monkeypatch.setattr(investigator_handler.budget, "tokens_used_today", lambda *args: 0)
+    monkeypatch.setattr(investigator_handler, "run_investigation", lambda *args: None)
+    anomaly = "client changed mid-session: Chrome on macOS to Headless Chrome on Linux"
+    data = {**payload(), "context": agent_context(anomalies=[anomaly])}
+    investigator_handler.lambda_handler(data, None)
+    content = chat_payloads(fakes["sns"])[0]["content"]
+    assert content["title"].startswith("[HIGH] ")
+    assert anomaly in content["description"]
+
+
+def test_agent_sees_client_and_record_keeps_it(investigator_handler, base_env, monkeypatch):
+    fakes = wire(investigator_handler, monkeypatch)
+    captured = {}
+
+    def fake_agent(**kwargs):
+        captured.update(kwargs)
+        return dict(VERDICT), {"inputTokens": 10, "outputTokens": 5}
+
+    monkeypatch.setattr(investigator_handler.agent_loop, "run_agent", fake_agent)
+    monkeypatch.setattr(investigator_handler.budget, "consume_tokens", lambda *args: 15)
+    saved = {}
+    monkeypatch.setattr(
+        investigator_handler.memory, "save_investigation", lambda **kw: saved.update(kw)
+    )
+    data = payload()
+    context = agent_context(observations=["first change by this actor from AI agent"])
+    investigator_handler.run_investigation(
+        dict(sample_events.AGENT_API_MUTATION), data["identity"], data["account_label"],
+        data["session_id"], None, None, context,
+    )
+    prompt = captured["user_prompt"]
+    assert prompt.startswith("Investigate this API change made by an AI agent.")
+    assert "Client: AI agent cursor-agent via AWS CLI on macOS" in prompt
+    assert "Client signals: first change by this actor from AI agent" in prompt
+    assert "6. Who drove it:" in captured["system_prompt"]
+    assert "Driven by (deterministic assessment): AI agent, medium confidence" in prompt
+    assert "user agent app ID cursor-agent (client, strong)" in prompt
+    item = fakes["dynamodb"].put_item.call_args.kwargs["Item"]
+    assert item["client_kind"]["S"] == "ai-agent"
+    assert item["agent"]["S"] == "cursor-agent"
+    assert item["driver"]["S"] == "ai-agent"
+    assert item["driver_confidence"]["S"] == "medium"
+    assert "using AI agent cursor-agent" in saved["event_summary"]
+    assert ", driven by AI agent, medium confidence" in saved["event_summary"]
+    assert saved["event_summary"].startswith("API change by")
+
+
+def test_session_behavior_joins_the_assessment(investigator_handler, base_env, monkeypatch):
+    wire(investigator_handler, monkeypatch)
+    monkeypatch.setattr(investigator_handler.budget, "tokens_used_today", lambda *args: 0)
+    steps = [
+        {"name": "GetCallerIdentity", "time": "2026-07-05T11:50:00Z", "readOnly": True},
+        {"name": "RunInstances", "time": "2026-07-05T12:00:00Z", "readOnly": False},
+    ]
+    monkeypatch.setattr(investigator_handler.tools, "session_timeline", lambda *args: steps)
+    captured = {}
+
+    def fake_run(*args):
+        captured["context"] = args[6]
+        return dict(VERDICT)
+
+    monkeypatch.setattr(investigator_handler, "run_investigation", fake_run)
+    investigator_handler.lambda_handler(payload(), None)
+    signals = [item["signal"] for item in captured["context"]["assessment"]["evidence"]]
+    assert "GetCallerIdentity in the session, a typical CLI or agent first step" in signals
+    assert "console session credentials" in signals, "detector-less payloads are assessed too"

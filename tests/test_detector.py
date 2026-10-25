@@ -236,3 +236,259 @@ def test_account_alias_resolution(detector_handler, base_env, monkeypatch):
     wire(detector_handler, monkeypatch, iam=iam)
     label = detector_handler.get_account_label(sample_events.CONSOLE_MUTATION)
     assert label == "prod-alias (123456789012)"
+
+
+# --- Clients and AI agents ------------------------------------------------------
+
+
+def tracking(session=None, actor=None):
+    """Fake DynamoDB whose update_item returns old session and actor attributes."""
+    dynamodb = MagicMock()
+    dynamodb.update_item.side_effect = [
+        {"Attributes": session or {}},
+        {"Attributes": actor or {}},
+    ]
+    return dynamodb
+
+
+def test_labelled_agent_api_change_is_investigated(detector_handler, base_env, monkeypatch):
+    fakes = wire(detector_handler, monkeypatch)
+    event = sample_events.eventbridge_envelope(sample_events.AGENT_API_MUTATION)
+    result = detector_handler.lambda_handler(event, None)
+    assert result["decision"] == "investigating"
+    payload = json.loads(fakes["lambda"].invoke.call_args.kwargs["Payload"])
+    assert payload["context"]["origin"] == "api"
+    assert payload["context"]["client"]["agent"] == "cursor-agent"
+
+
+def test_agent_api_watching_can_be_disabled(detector_handler, base_env, monkeypatch):
+    monkeypatch.setenv("AGENT_API_CHANGES", "false")
+    fakes = wire(detector_handler, monkeypatch)
+    event = sample_events.eventbridge_envelope(sample_events.AGENT_API_MUTATION)
+    result = detector_handler.lambda_handler(event, None)
+    assert result["decision"] == "skipped"
+    fakes["lambda"].invoke.assert_not_called()
+
+
+def test_agent_browser_title_names_the_agent(detector_handler, base_env, monkeypatch):
+    monkeypatch.setenv("ENABLE_AI", "false")
+    fakes = wire(detector_handler, monkeypatch)
+    event = sample_events.eventbridge_envelope(sample_events.AGENT_BROWSER_MUTATION)
+    detector_handler.lambda_handler(event, None)
+    message = json.loads(fakes["sns"].publish.call_args.kwargs["Message"])
+    assert message["content"]["title"] == "ClickOps by an AI agent detected: RunInstances"
+    assert "*Client*: Cursor browser (AI agent tool) on macOS" in message["content"]["description"]
+    subject, html, _text = fakes["email"].call_args.args
+    assert subject == "ClickOps by an AI agent detected: RunInstances"
+    assert "Console change by an AI agent" in html
+
+
+def test_browser_switch_mid_session_is_an_anomaly(detector_handler, base_env, monkeypatch):
+    dynamodb = tracking(
+        session={
+            "fingerprint": {"S": "browser|Firefox|Windows"},
+            "client_label": {"S": "Firefox on Windows"},
+        }
+    )
+    # Dedup succeeds, then the session cooldown is active.
+    dynamodb.put_item.side_effect = [{}, client_error("ConditionalCheckFailedException")]
+    fakes = wire(detector_handler, monkeypatch, dynamodb=dynamodb)
+    event = sample_events.eventbridge_envelope(sample_events.BROWSER_MUTATION)
+    result = detector_handler.lambda_handler(event, None)
+    assert result["decision"] == "investigating", "anomalies bypass the cooldown"
+    payload = json.loads(fakes["lambda"].invoke.call_args.kwargs["Payload"])
+    assert payload["context"]["anomalies"] == [
+        "client changed mid-session: Firefox on Windows to Chrome on macOS"
+    ]
+    session_update = dynamodb.update_item.call_args_list[0].kwargs
+    assert session_update["Key"]["pk"]["S"] == "SESSION#ASIAEXAMPLEKEY"
+    assert session_update["ExpressionAttributeValues"][":f"]["S"] == "browser|Chrome|macOS"
+
+
+def test_browser_to_cli_switch_is_only_an_observation(detector_handler, base_env, monkeypatch):
+    dynamodb = tracking(
+        session={"fingerprint": {"S": "cli|AWS CLI|macOS"}, "client_label": {"S": "AWS CLI"}}
+    )
+    fakes = wire(detector_handler, monkeypatch, dynamodb=dynamodb)
+    event = sample_events.eventbridge_envelope(sample_events.BROWSER_MUTATION)
+    detector_handler.lambda_handler(event, None)
+    payload = json.loads(fakes["lambda"].invoke.call_args.kwargs["Payload"])
+    assert payload["context"]["anomalies"] == []
+    assert payload["context"]["observations"] == [
+        "session used from several clients: AWS CLI to Chrome on macOS"
+    ]
+
+
+def test_country_switch_mid_session_raises_the_rating(detector_handler, base_env, monkeypatch):
+    monkeypatch.setenv("ENABLE_AI", "false")
+    dynamodb = tracking(
+        session={"fingerprint": {"S": "browser|Chrome|macOS"}, "country": {"S": "US"}}
+    )
+    fakes = wire(detector_handler, monkeypatch, dynamodb=dynamodb)
+    monkeypatch.setattr(
+        detector_handler.ip_intel, "lookup", MagicMock(return_value=sample_events.IP_INFO)
+    )
+    event = sample_events.eventbridge_envelope(sample_events.BROWSER_MUTATION)
+    detector_handler.lambda_handler(event, None)
+    message = json.loads(fakes["sns"].publish.call_args.kwargs["Message"])
+    assert message["content"]["title"] == "[HIGH] ClickOps detected: RunInstances"
+    description = message["content"]["description"]
+    assert "source country changed mid-session: US to FR" in description
+    assert "*Client signals*:" in description
+
+
+def test_first_client_for_actor_is_an_observation(detector_handler, base_env, monkeypatch):
+    dynamodb = tracking(actor={"fingerprints": {"SS": ["browser|Firefox|Windows"]}})
+    fakes = wire(detector_handler, monkeypatch, dynamodb=dynamodb)
+    event = sample_events.eventbridge_envelope(sample_events.BROWSER_MUTATION)
+    detector_handler.lambda_handler(event, None)
+    payload = json.loads(fakes["lambda"].invoke.call_args.kwargs["Payload"])
+    assert payload["context"]["observations"] == [
+        "first change by this actor from Chrome on macOS"
+    ]
+    actor_update = dynamodb.update_item.call_args_list[1].kwargs
+    assert actor_update["Key"]["pk"]["S"] == "ACTOR#alice@example.com"
+
+
+def test_known_client_and_first_ever_client_are_quiet(detector_handler, base_env, monkeypatch):
+    for actor in ({"fingerprints": {"SS": ["browser|Chrome|macOS"]}}, {}):
+        fakes = wire(detector_handler, monkeypatch, dynamodb=tracking(actor=actor))
+        event = sample_events.eventbridge_envelope(sample_events.BROWSER_MUTATION)
+        detector_handler.lambda_handler(event, None)
+        payload = json.loads(fakes["lambda"].invoke.call_args.kwargs["Payload"])
+        assert payload["context"]["observations"] == []
+
+
+def test_tracking_failure_never_blocks_the_alert(detector_handler, base_env, monkeypatch):
+    dynamodb = MagicMock()
+    dynamodb.update_item.side_effect = client_error("ProvisionedThroughputExceededException")
+    fakes = wire(detector_handler, monkeypatch, dynamodb=dynamodb)
+    event = sample_events.eventbridge_envelope(sample_events.BROWSER_MUTATION)
+    result = detector_handler.lambda_handler(event, None)
+    assert result["decision"] == "investigating"
+    fakes["lambda"].invoke.assert_called_once()
+
+
+def test_aws_internal_user_agent_is_not_tracked(detector_handler, base_env, monkeypatch):
+    fakes = wire(detector_handler, monkeypatch)
+    event = sample_events.eventbridge_envelope(sample_events.CONSOLE_MUTATION)
+    detector_handler.lambda_handler(event, None)
+    fakes["dynamodb"].update_item.assert_not_called()
+
+
+# --- Who drove the change ---------------------------------------------------------
+
+
+def test_mcp_server_change_is_watched_despite_invoked_by(detector_handler, base_env, monkeypatch):
+    monkeypatch.setenv("ENABLE_AI", "false")
+    fakes = wire(detector_handler, monkeypatch)
+    event = sample_events.eventbridge_envelope(sample_events.MCP_MUTATION)
+    result = detector_handler.lambda_handler(event, None)
+    assert result["decision"] == "notified"
+    message = json.loads(fakes["sns"].publish.call_args.kwargs["Message"])
+    assert message["content"]["title"].endswith(
+        "AI agent change detected: AuthorizeSecurityGroupIngress"
+    )
+    description = message["content"]["description"]
+    assert "*Client*: AI agent via AWS MCP Server" in description
+    assert "*Driven by*: AI agent, high confidence" in description
+    assert "called through AWS MCP Server (AWS, strong)" in description
+
+
+def test_mcp_server_change_follows_the_agent_api_switch(detector_handler, base_env, monkeypatch):
+    monkeypatch.setenv("AGENT_API_CHANGES", "false")
+    wire(detector_handler, monkeypatch)
+    event = sample_events.eventbridge_envelope(sample_events.MCP_MUTATION)
+    assert detector_handler.lambda_handler(event, None)["decision"] == "skipped"
+
+
+def test_payload_carries_the_assessment(detector_handler, base_env, monkeypatch):
+    fakes = wire(detector_handler, monkeypatch)
+    event = sample_events.eventbridge_envelope(sample_events.AGENT_BROWSER_MUTATION)
+    detector_handler.lambda_handler(event, None)
+    payload = json.loads(fakes["lambda"].invoke.call_args.kwargs["Payload"])
+    assert payload["context"]["assessment"]["driver"] == "ai-agent"
+    assert payload["context"]["lineage"] == {}
+
+
+def lineage_cloudtrail(monkeypatch, detector_handler, events_by_attribute):
+    calls = []
+
+    def lookup_events(**kwargs):
+        attribute = kwargs["LookupAttributes"][0]["AttributeKey"]
+        calls.append(attribute)
+        events = events_by_attribute.get(attribute, [])
+        return {"Events": [{"CloudTrailEvent": json.dumps(event)} for event in events]}
+
+    cloudtrail = MagicMock()
+    cloudtrail.lookup_events.side_effect = lookup_events
+    monkeypatch.setattr(detector_handler.lineage_mod.time, "sleep", lambda _s: None)
+    return cloudtrail, calls
+
+
+def test_federated_console_session_lineage_is_looked_up_and_cached(
+    detector_handler, base_env, monkeypatch
+):
+    monkeypatch.setenv("SESSION_LINEAGE", "true")
+    dynamodb = tracking()
+    dynamodb.update_item.side_effect = [{"Attributes": {}}, {"Attributes": {}}, {}]
+    dynamodb.get_item.return_value = {}
+    fakes = wire(detector_handler, monkeypatch, dynamodb=dynamodb)
+    cloudtrail, calls = lineage_cloudtrail(
+        monkeypatch,
+        detector_handler,
+        {
+            "ResourceName": [sample_events.ASSUME_ROLE_FOR_FEDERATED],
+            "EventName": [sample_events.CONSOLE_LOGIN_FOR_FEDERATED],
+        },
+    )
+    fakes["cloudtrail@eu-west-1"] = cloudtrail
+    fakes["cloudtrail@us-east-1"] = cloudtrail
+    event = sample_events.eventbridge_envelope(sample_events.FEDERATED_CONSOLE_MUTATION)
+    detector_handler.lambda_handler(event, None)
+
+    payload = json.loads(fakes["lambda"].invoke.call_args.kwargs["Payload"])
+    assert payload["context"]["lineage"]["signin_gap_seconds"] == 389
+    assessment = payload["context"]["assessment"]
+    assert (assessment["driver"], assessment["confidence"]) == ("ai-agent", "high")
+    signals = " ".join(item["signal"] for item in assessment["evidence"])
+    assert "session tag AccessType=AI marks an AI agent" in signals
+    assert "created 6 minutes earlier" in signals
+    assert calls == ["ResourceName", "EventName"]
+    cache_write = dynamodb.update_item.call_args_list[2].kwargs
+    assert cache_write["Key"] == {
+        "pk": {"S": "SESSION#ASIACONSOLEKEY"},
+        "sk": {"S": "LINEAGE"},
+    }
+
+
+def test_cached_lineage_skips_event_history(detector_handler, base_env, monkeypatch):
+    monkeypatch.setenv("SESSION_LINEAGE", "true")
+    dynamodb = tracking()
+    dynamodb.get_item.return_value = {
+        "Item": {"lineage": {"S": json.dumps({"signin_gap_seconds": 389})}}
+    }
+    fakes = wire(detector_handler, monkeypatch, dynamodb=dynamodb)
+    cloudtrail = MagicMock()
+    fakes["cloudtrail@eu-west-1"] = cloudtrail
+    fakes["cloudtrail@us-east-1"] = cloudtrail
+    event = sample_events.eventbridge_envelope(sample_events.FEDERATED_CONSOLE_MUTATION)
+    detector_handler.lambda_handler(event, None)
+    cloudtrail.lookup_events.assert_not_called()
+    payload = json.loads(fakes["lambda"].invoke.call_args.kwargs["Payload"])
+    assert payload["context"]["lineage"] == {"signin_gap_seconds": 389}
+
+
+def test_incomplete_recent_lineage_is_not_cached(detector_handler, base_env, monkeypatch):
+    monkeypatch.setenv("SESSION_LINEAGE", "true")
+    record = json.loads(json.dumps(sample_events.FEDERATED_CONSOLE_MUTATION))
+    now = detector_handler.time.strftime("%Y-%m-%dT%H:%M:%SZ", detector_handler.time.gmtime())
+    record["userIdentity"]["sessionContext"]["attributes"]["creationDate"] = now
+    dynamodb = tracking()
+    dynamodb.get_item.return_value = {}
+    fakes = wire(detector_handler, monkeypatch, dynamodb=dynamodb)
+    cloudtrail, _calls = lineage_cloudtrail(monkeypatch, detector_handler, {})
+    fakes["cloudtrail@eu-west-1"] = cloudtrail
+    fakes["cloudtrail@us-east-1"] = cloudtrail
+    detector_handler.lambda_handler(sample_events.eventbridge_envelope(record), None)
+    assert dynamodb.update_item.call_count == 2, "session and actor tracking only"

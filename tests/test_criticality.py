@@ -349,3 +349,35 @@ def test_technique_url():
     assert criticality.technique_url("T1562.008") == (
         "https://attack.mitre.org/techniques/T1562/008/"
     )
+
+
+# --- Session anomalies ---------------------------------------------------------
+
+
+def test_session_anomaly_without_catalog_match_becomes_the_rating():
+    rating = criticality.apply_session_anomalies(None, ["client changed mid-session: a to b"])
+    assert rating["rule_id"] == "SES-001"
+    assert rating["level"] == "high"
+    assert rating["reasons"] == ["client changed mid-session: a to b"]
+    assert "T1550.004" in rating["techniques"]
+
+
+def test_session_anomaly_raises_a_low_rating_and_keeps_its_rule():
+    base = rate("ec2", "RunInstances", {"instanceType": "t3.micro"})
+    raised = criticality.apply_session_anomalies(base, ["source country changed: FR to US"])
+    assert raised["rule_id"] == base["rule_id"]
+    assert raised["level"] == "high"
+    assert "source country changed: FR to US" in raised["reasons"]
+    assert "T1550.004" in raised["techniques"]
+    assert base["level"] == "low" and "T1550.004" not in base["techniques"]
+
+
+def test_session_anomaly_never_lowers_a_critical_rating():
+    base = rate("cloudtrail", "StopLogging")
+    assert criticality.apply_session_anomalies(base, ["x"])["level"] == "critical"
+
+
+def test_no_session_anomaly_leaves_the_rating_untouched():
+    base = rate("cloudtrail", "StopLogging")
+    assert criticality.apply_session_anomalies(base, []) is base
+    assert criticality.apply_session_anomalies(None, []) is None

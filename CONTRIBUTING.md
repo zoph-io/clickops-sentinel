@@ -20,9 +20,10 @@ make validate   # sam validate --lint
   clients in unit tests.
 - Keep the suppression list (`src/detector/suppressed_actions.py`) sorted and
   commented with the reason for each nonobvious entry.
-- The criticality catalog (`criticality.py`) and IP enrichment
-  (`ip_intel.py`) exist in both `src/detector/` and `src/investigator/` and
-  must stay identical, as do the email modules. After changing catalog
+- The criticality catalog (`criticality.py`), IP enrichment
+  (`ip_intel.py`), user agent classification (`client.py`), and the
+  who-drove-it assessment (`origin.py`) exist in both `src/detector/` and
+  `src/investigator/` and must stay identical, as do the email modules. After changing catalog
   rules, run `make catalog-doc`; a test fails if
   `docs/criticality-catalog.md` is stale. Give each rule a MITRE ATT&CK
   technique and, where one exists, a Stratus Red Team technique.

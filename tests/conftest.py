@@ -66,6 +66,8 @@ def base_env(monkeypatch):
         "METRICS_NAMESPACE": "ClickOpsSentinel",
         # Tests never reach the network; enrichment is exercised with fakes.
         "IP_LOOKUP_PROVIDER": "none",
+        # Session lineage reads CloudTrail event history; tests opt in with fakes.
+        "SESSION_LINEAGE": "false",
         "CRITICALITY_OVERRIDES": "",
         "STACK_NAME": "clickops-sentinel",
     }

@@ -52,6 +52,92 @@ CLI_MUTATION = {
 }
 del CLI_MUTATION["sessionCredentialFromConsole"]
 
+# User agents recorded in CloudTrail.
+CHROME_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
+)
+CURSOR_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Cursor/3.27.6 Chrome/148.0.7778.280 Electron/42.11.16 Safari/537.36"
+)
+AGENT_CLI_UA = (
+    "aws-cli/2.38.5 md/awscrt#0.38.0 ua/2.1 os/macos#27.0.0 md/arch#arm64 "
+    "lang/python#3.15.1 m/b,n,i cfg/retry-mode#standard app/cursor-agent "
+    "md/installer#source md/prompt#off md/command#ec2.run-instances"
+)
+
+AGENT_API_MUTATION = {
+    **copy.deepcopy(CLI_MUTATION),
+    "eventID": "23232323-2323-2323-2323-232323232323",
+    "userAgent": AGENT_CLI_UA,
+}
+
+BROWSER_MUTATION = {
+    **copy.deepcopy(CONSOLE_MUTATION),
+    "eventID": "24242424-2424-2424-2424-242424242424",
+    "userAgent": CHROME_UA,
+}
+
+AGENT_BROWSER_MUTATION = {
+    **copy.deepcopy(CONSOLE_MUTATION),
+    "eventID": "25252525-2525-2525-2525-252525252525",
+    "userAgent": CURSOR_UA,
+}
+
+# A console session opened from CLI credentials (GetSigninToken), as the
+# Cursor agent browser did: the CLI's session name and its creation date.
+FEDERATED_ROLE_ARN = "arn:aws:iam::123456789012:role/admin"
+FEDERATED_SESSION_ARN = "arn:aws:sts::123456789012:assumed-role/admin/botocore-session-1792740938"
+FEDERATED_CONSOLE_MUTATION = {
+    **copy.deepcopy(CONSOLE_MUTATION),
+    "eventID": "26262626-2626-2626-2626-262626262626",
+    "eventTime": "2026-07-05T13:02:36Z",
+    "awsRegion": "eu-west-1",
+    "userAgent": CURSOR_UA,
+    "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "AROAEXAMPLE:botocore-session-1792740938",
+        "arn": FEDERATED_SESSION_ARN,
+        "accountId": "123456789012",
+        "accessKeyId": "ASIACONSOLEKEY",
+        "sessionContext": {
+            "sessionIssuer": {"type": "Role", "arn": FEDERATED_ROLE_ARN, "userName": "admin"},
+            "attributes": {"creationDate": "2026-07-05T07:35:38Z", "mfaAuthenticated": "false"},
+        },
+    },
+}
+ASSUME_ROLE_FOR_FEDERATED = {
+    "eventName": "AssumeRole",
+    "eventTime": "2026-07-05T07:35:38Z",
+    "userAgent": AGENT_CLI_UA,
+    "requestParameters": {
+        "roleArn": FEDERATED_ROLE_ARN,
+        "roleSessionName": "botocore-session-1792740938",
+        "tags": [{"key": "AccessType", "value": "AI"}],
+    },
+    "responseElements": {"assumedRoleUser": {"arn": FEDERATED_SESSION_ARN}},
+}
+CONSOLE_LOGIN_FOR_FEDERATED = {
+    "eventName": "ConsoleLogin",
+    "eventTime": "2026-07-05T07:42:07Z",
+    "userIdentity": {"arn": FEDERATED_SESSION_ARN},
+}
+
+# A change the AWS MCP Server made on the user's behalf.
+MCP_MUTATION = {
+    **copy.deepcopy(CLI_MUTATION),
+    "eventID": "27272727-2727-2727-2727-272727272727",
+    "eventName": "AuthorizeSecurityGroupIngress",
+    "sourceIPAddress": "aws-mcp.amazonaws.com",
+    "userAgent": "aws-mcp.amazonaws.com",
+    "eventCategory": "Data",
+}
+MCP_MUTATION["userIdentity"] = {
+    **copy.deepcopy(CONSOLE_MUTATION["userIdentity"]),
+    "invokedBy": "aws-mcp.amazonaws.com",
+}
+
 CONSOLE_READONLY = {
     **copy.deepcopy(CONSOLE_MUTATION),
     "eventID": "33333333-3333-3333-3333-333333333333",

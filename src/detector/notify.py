@@ -7,8 +7,10 @@ render natively in Slack and Microsoft Teams. Email messages are plain text.
 
 import json
 
+import client as client_mod
 import criticality
 import ip_intel
+import origin
 
 
 def cloudtrail_console_link(region: str, event_id: str) -> str:
@@ -56,12 +58,29 @@ def summarize_request_parameters(record: dict, limit: int = 400) -> str:
     return text
 
 
+def _client_fields(context: dict | None) -> list:
+    """Origin, client, and session signals as (label, value) pairs."""
+    if not context:
+        return []
+    fields = []
+    if context.get("origin") == "api":
+        fields.append(("Origin", "API call, not the console"))
+    client_line = client_mod.describe(context.get("client"))
+    if client_line:
+        fields.append(("Client", client_line))
+    signals = client_mod.signal_lines(context)
+    if signals:
+        fields.append(("Client signals", "; ".join(signals)))
+    return fields + origin.fields(context.get("assessment"))
+
+
 def build_plain_alert(
     record: dict,
     who: str,
     account_label: str,
     rating: dict | None = None,
     ip_info: dict | None = None,
+    context: dict | None = None,
 ) -> dict:
     """Build title, markdown, and plain-text bodies for a detection alert."""
     event_name = record.get("eventName", "UnknownEvent")
@@ -76,7 +95,8 @@ def build_plain_alert(
     source_network = ip_intel.describe(ip_info)
 
     level = criticality.level_of(rating)
-    title = f"{criticality.title_prefix(level)}ClickOps detected: {event_name}"
+    title = f"{criticality.title_prefix(level)}{client_mod.headline(context)}: {event_name}"
+    client_fields = _client_fields(context)
     lines = []
     if rating:
         lines.append(f"*Criticality*: {criticality.describe(rating)}")
@@ -90,6 +110,7 @@ def build_plain_alert(
     ]
     if source_network:
         lines.append(f"*Source network*: {source_network}")
+    lines += [f"*{label}*: {value}" for label, value in client_fields]
     if error_code:
         lines.append(f"*Result*: failed ({error_code})")
     if params:
@@ -110,6 +131,7 @@ def build_plain_alert(
     ]
     if source_network:
         text_lines.append(f"Source network: {source_network}")
+    text_lines += [f"{label}: {value}" for label, value in client_fields]
     if error_code:
         text_lines.append(f"Result: failed ({error_code})")
     if params:
@@ -121,7 +143,12 @@ def build_plain_alert(
 
 
 def build_login_alert(
-    record: dict, who: str, account_label: str, reason: str, ip_info: dict | None = None
+    record: dict,
+    who: str,
+    account_label: str,
+    reason: str,
+    ip_info: dict | None = None,
+    client_info: dict | None = None,
 ) -> dict:
     """Build bodies for a console sign-in alert."""
     region = record.get("awsRegion", "us-east-1")
@@ -143,12 +170,16 @@ def build_login_alert(
     ]
     if source_network:
         lines.append(f"*Source network*: {source_network}")
+    if client_mod.describe(client_info):
+        lines.append(f"*Client*: {client_mod.describe(client_info)}")
     markdown = "\n".join(lines)
     plain_text = title + "\n" + markdown.replace("*", "")
     return {"title": title, "markdown": markdown, "text": plain_text}
 
 
-def build_followup_note(record: dict, who: str, rating: dict | None = None) -> dict:
+def build_followup_note(
+    record: dict, who: str, rating: dict | None = None, context: dict | None = None
+) -> dict:
     """Short note for additional changes within an already-investigated session."""
     event_name = record.get("eventName", "UnknownEvent")
     event_source = record.get("eventSource", "unknown")
@@ -160,6 +191,9 @@ def build_followup_note(record: dict, who: str, rating: dict | None = None) -> d
     if level:
         title += f" ({level.upper()})"
     rating_line = f"\nCriticality: {criticality.describe(rating)}" if rating else ""
+    signals = client_mod.signal_lines(context)
+    if signals:
+        rating_line += f"\nClient signals: {'; '.join(signals)}"
     markdown = (
         f"{who} also performed {event_source}:{event_name} "
         f"in the session investigated above. <{link}|View event>{rating_line}"

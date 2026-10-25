@@ -7,6 +7,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Client classification from the CloudTrail user agent on every alert and
+  in the agent's context: browser, AI agent browser (such as Cursor's
+  built-in browser), automated browser (headless Chrome, Playwright),
+  CloudShell, IaC tools, CLI and SDK, and AI agents through the API.
+- API changes by AI agents that set `AWS_SDK_UA_APP_ID` are alerted like
+  console changes, through a second EventBridge rule. New
+  `WatchAgentApiChanges` and `AgentAppIds` parameters.
+- Session anomalies: a session that switches browser or source country
+  between two changes is raised to at least high (new catalog modifier
+  SES-001, MITRE T1550.004) and bypasses the session cooldown.
+- First change by a person from a client never seen for them is noted on
+  the alert. `make stats` breaks investigations down by client and AI agent.
+- Who drove each change: a person, an AI agent, or automation, with a
+  confidence level and the evidence, on every alert, in the agent's
+  context, in investigation records, and in `make stats`. The verdict
+  weighs AWS-recorded evidence above the self-reported user agent: a console
+  session opened from CLI or SDK credentials (looked up once per session in
+  CloudTrail Event History, with the `AssumeRole` call behind it), session
+  tags, source identity, agent session names, long-term access keys, MFA,
+  cloud or hosting source networks, and call patterns in the session
+  retrace. Disagreement between client and AWS evidence is reported, and a
+  person is never rated high confidence without MFA or a source identity.
+  New `AgentRoleNames` parameter; the detector gains
+  `cloudtrail:LookupEvents`.
+- Changes made through AWS-managed MCP servers (`invokedBy`
+  `*-mcp.amazonaws.com`) are alerted as AI agent changes through a third
+  EventBridge rule, under `WatchAgentApiChanges`. They are data events, so
+  the trail must log them.
 - Criticality scale (none, low, medium, high, critical) and a deterministic
   catalog of risky AWS actions mapped to MITRE ATT&CK and Stratus Red Team,
   published in `docs/criticality-catalog.md` (`make catalog-doc`). Parameter

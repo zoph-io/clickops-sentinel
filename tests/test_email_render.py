@@ -3,8 +3,10 @@
 
 import sample_events
 
+import client
 import criticality
 import email_render
+import origin
 
 VERDICT = {
     "verdict": "manual-change-confirmed",
@@ -186,3 +188,57 @@ def test_note_email_content():
     assert email["subject"] == "Title here"
     assert "Body text here." in email["html"]
     _assert_style(email["html"])
+
+
+def test_email_shows_client_and_session_signals():
+    context = client.new_context(sample_events.BROWSER_MUTATION)
+    context["anomalies"] = ["source country changed mid-session: US to FR"]
+    context["observations"] = ["first change by this actor from Chrome on macOS"]
+    email = email_render.plain_email(
+        sample_events.BROWSER_MUTATION, "alice", "prod", "", None, None, context
+    )
+    html = email["html"]
+    assert "Client: Chrome on macOS" in html
+    assert "Session anomaly: source country changed mid-session: US to FR" in html
+    assert "Note: first change by this actor from Chrome on macOS" in html
+    assert "Manual console change detected" in html
+    _assert_style(html)
+
+
+def test_agent_api_email_titles_and_path_label():
+    context = client.new_context(sample_events.AGENT_API_MUTATION)
+    email = email_render.enriched_email(
+        sample_events.AGENT_API_MUTATION, "alice", "prod", VERDICT, SESSION_STEPS, None, None,
+        context,
+    )
+    assert email["subject"] == "AI agent change detected: RunInstances"
+    html = email["html"]
+    assert "AI agent change detected" in html
+    assert "AGENT SESSION PATH" in html
+    assert "AI agent cursor-agent via AWS CLI on macOS (API call, not the console)" in html
+
+
+def test_email_shows_who_drove_it_and_disagreement():
+    record = dict(
+        sample_events.FEDERATED_CONSOLE_MUTATION, userAgent=sample_events.CHROME_UA
+    )
+    context = client.new_context(record)
+    context["assessment"] = origin.assess(
+        origin.collect(record, context["client"], lineage={"signin_gap_seconds": 389})
+    )
+    email = email_render.plain_email(record, "alice", "prod", "", None, None, context)
+    assert email["subject"] == "Automated ClickOps detected: RunInstances"
+    html = email["html"]
+    assert "Automated console change detected" in html
+    assert "Driven by: Automation, medium confidence" in html
+    assert "created 6 minutes earlier" in html
+    assert "Signals disagree: the client looks like a person" in html
+    _assert_style(html)
+
+
+def test_login_email_shows_client():
+    html = email_render.login_email(
+        sample_events.ROOT_LOGIN, "Root user", "prod", "root sign-in", None,
+        client.parse(sample_events.CHROME_UA),
+    )["html"]
+    assert "Client: Chrome on macOS" in html
