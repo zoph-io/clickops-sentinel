@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" aria-label="ClickOps Sentinel: Scout the meerkat on watch, spotting a click">
+  <title>ClickOps Sentinel: Scout the meerkat on watch, spotting a click</title><defs><radialGradient id="social-dawn" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#f59e0b" stop-opacity="0.30"/><stop offset="1" stop-color="#f59e0b" stop-opacity="0"/></radialGradient></defs><rect width="1280" height="640" fill="#0f1420"/><circle cx="1000" cy="260" r="300" fill="url(#social-dawn)"/><ellipse cx="1000" cy="660" rx="380" ry="110" fill="#1e293b"/><g transform="translate(764 72) scale(1.1)">
+  <path d="M300 420 C 352 428 380 446 396 478" fill="none" stroke="#c98d4e" stroke-width="20" stroke-linecap="round"/>
+  <path d="M389 463 C 392 468 395 473 397 479" fill="none" stroke="#3b2a1e" stroke-width="20" stroke-linecap="round"/>
+  <path d="M208 200 C 194 236 174 272 170 324 C 164 396 186 446 236 452 C 286 446 308 396 302 324 C 298 272 278 236 264 200 Z" fill="#d9a066"/>
+  <path d="M236 248 C 210 258 198 300 198 342 C 198 404 212 434 236 438 C 260 434 274 404 274 342 C 274 300 262 258 236 248 Z" fill="#f3dcae"/>
+  <ellipse cx="194" cy="430" rx="30" ry="24" fill="#c98d4e"/>
+  <ellipse cx="278" cy="430" rx="30" ry="24" fill="#c98d4e"/>
+  <ellipse cx="200" cy="456" rx="26" ry="10" fill="#3b2a1e"/>
+  <ellipse cx="272" cy="456" rx="26" ry="10" fill="#3b2a1e"/>
+  <path d="M196 262 C 190 292 202 308 222 316" fill="none" stroke="#c98d4e" stroke-width="22" stroke-linecap="round"/>
+  <path d="M276 262 C 282 292 270 308 250 316" fill="none" stroke="#c98d4e" stroke-width="22" stroke-linecap="round"/>
+  <ellipse cx="226" cy="320" rx="11" ry="8" fill="#3b2a1e"/>
+  <ellipse cx="246" cy="320" rx="11" ry="8" fill="#3b2a1e"/>
+  <circle cx="170" cy="126" r="18" fill="#c98d4e"/>
+  <circle cx="302" cy="126" r="18" fill="#c98d4e"/>
+  <circle cx="172" cy="127" r="8" fill="#3b2a1e"/>
+  <circle cx="300" cy="127" r="8" fill="#3b2a1e"/>
+  <path d="M236 74 C 282 74 304 104 302 140 C 300 176 270 214 236 222 C 202 214 172 176 170 140 C 168 104 190 74 236 74 Z" fill="#d9a066"/>
+  <path d="M236 84 C 229 100 229 118 236 134 C 243 118 243 100 236 84 Z" fill="#c98d4e"/>
+  <ellipse cx="236" cy="194" rx="22" ry="20" fill="#f3dcae"/>
+  <ellipse cx="208" cy="148" rx="18" ry="23" transform="rotate(-18 208 148)" fill="#3b2a1e"/>
+  <ellipse cx="264" cy="148" rx="18" ry="23" transform="rotate(18 264 148)" fill="#3b2a1e"/>
+  <circle cx="213" cy="144" r="9" fill="#0b0f17"/>
+  <circle cx="269" cy="144" r="9" fill="#0b0f17"/>
+  <circle cx="216" cy="141" r="3.5" fill="#ffffff"/>
+  <circle cx="272" cy="141" r="3.5" fill="#ffffff"/>
+  <path d="M227 202 Q 236 196 245 202 Q 241 211 236 212 Q 231 211 227 202 Z" fill="#3b2a1e"/>
+  <path d="M236 212 L 236 218" stroke="#3b2a1e" stroke-width="3" stroke-linecap="round"/>
+  <g transform="translate(400 60) scale(1.0)">
+    <circle r="34" fill="none" stroke="#f59e0b" stroke-width="5" opacity="0.45"/>
+    <circle r="18" fill="none" stroke="#f59e0b" stroke-width="5"/>
+    <path d="M0 0 L 0 56 L 14 43 L 25 68 L 36 63 L 25 39 L 44 39 Z" fill="#f8fafc" stroke="#0f1420" stroke-width="5" stroke-linejoin="round"/>
+  </g></g><text x="80" y="290" font-family="-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="84" font-weight="800" letter-spacing="-1"><tspan fill="#ffffff">ClickOps</tspan><tspan fill="#f59e0b" dx="21">Sentinel</tspan></text><text x="84" y="356" font-family="-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="32" font-weight="500" fill="#94a3b8">Every click, watched.</text><text x="84" y="420" font-family="-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="24" fill="#64748b">Manual changes to your AWS accounts, caught and explained in seconds.</text>
+</svg>

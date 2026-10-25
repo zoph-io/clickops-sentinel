@@ -29,6 +29,13 @@ make validate   # sam validate --lint
   technique and, where one exists, a Stratus Red Team technique.
 - Writing style for docs, code comments, commit messages, and notification
   content: no em-dashes and no emojis.
+- Visual changes follow the [brand and design system](docs/brand/README.md).
+  Colors live in `docs/brand/tokens.json` and in `COLOR` in
+  `email_render.py`; a test keeps them equal. Build emails from the existing
+  components (`_header`, `_who_block`, `_cards`, `_callout`, `_cta`) rather
+  than new one-off markup. After changing an email, run `make screenshots`
+  so the README shows the real template. Logo changes go in
+  `scripts/render_brand.py`, then `make brand`.
 - Follow conventional commit prefixes (`feat:`, `fix:`, `docs:`, `chore:`)
   where practical.
 

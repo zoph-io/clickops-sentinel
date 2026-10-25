@@ -176,8 +176,13 @@ def test_followup_note_carries_criticality(detector_handler, base_env, monkeypat
     event = sample_events.eventbridge_envelope(sample_events.CONSOLE_MUTATION)
     detector_handler.lambda_handler(event, None)
     message = json.loads(fakes["sns"].publish.call_args.kwargs["Message"])
-    assert message["content"]["title"].endswith("(LOW)")
-    assert "CMP-005" in message["content"]["description"]
+    assert message["content"]["title"].startswith("Same session, additional change: ")
+    assert "*Criticality*: LOW. CMP-005" in message["content"]["description"]
+    assert "View event in CloudTrail" in message["content"]["description"]
+    subject, html_body, _ = fakes["email"].call_args.args
+    assert subject.startswith("Same session, additional change: ")
+    assert "WHY NO NEW INVESTIGATION" in html_body
+    assert "CMP-005" in html_body
 
 
 def test_ip_info_is_looked_up_once_and_handed_to_investigator(

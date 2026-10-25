@@ -312,11 +312,25 @@ def publish_plain(
 
 
 def publish_followup(
-    record: dict, who: str, session_id: str, rating: dict | None, context: dict
+    record: dict,
+    who: str,
+    session_id: str,
+    rating: dict | None,
+    ip_info: dict | None,
+    context: dict,
 ) -> None:
+    account_label = get_account_label(record)
     alert = notify.build_followup_note(record, who, rating, context)
     _publish_chat(alert, session_id)
-    email = email_render.note_email(alert["title"], alert["text"])
+    email = email_render.followup_email(
+        record,
+        who,
+        account_label,
+        rating,
+        ip_info,
+        context,
+        int(os.environ.get("SESSION_COOLDOWN_MINUTES", "30")),
+    )
     email_send.send_email(email["subject"], email["html"], alert["text"])
 
 
@@ -392,7 +406,7 @@ def handle_change(record: dict) -> dict:
     if ai_enabled and session_cooldown_active(session_id):
         # A session that switched client or country gets a fresh investigation.
         if not criticality.bypasses_cooldown(rating) and not context["anomalies"]:
-            publish_followup(record, who["display"], session_id, rating, context)
+            publish_followup(record, who["display"], session_id, rating, ip_info, context)
             log_decision(event_id, "followup", session=session_id, **log_fields)
             return {"decision": "followup"}
         cooldown_bypassed = True

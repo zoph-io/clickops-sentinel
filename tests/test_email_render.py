@@ -187,7 +187,72 @@ def test_note_email_content():
     email = email_render.note_email("Title here", "Body text here.")
     assert email["subject"] == "Title here"
     assert "Body text here." in email["html"]
+    assert "NOTICE" in email["html"]
     _assert_style(email["html"])
+
+
+def test_followup_email_is_a_full_card():
+    rating = criticality.classify(sample_events.CONSOLE_MUTATION)
+    context = client.new_context(sample_events.BROWSER_MUTATION)
+    context["assessment"] = origin.assess(
+        origin.collect(sample_events.BROWSER_MUTATION, context["client"])
+    )
+    email = email_render.followup_email(
+        sample_events.CONSOLE_MUTATION,
+        "alice@example.com",
+        "prod (123456789012)",
+        rating,
+        sample_events.IP_INFO,
+        context,
+        cooldown_minutes=45,
+    )
+    html = email["html"]
+    assert email["subject"] == "Same session, additional change: RunInstances"
+    assert "FOLLOW-UP" in html
+    assert "alice@example.com" in html
+    assert "Orange S.A." in html
+    assert "Client: Chrome on macOS" in html
+    assert "Driven by:" in html
+    assert "ACTION" in html and "RunInstances" in html
+    assert rating["rule_id"] in html
+    assert "less than 45 minutes ago" in html
+    assert "View event in CloudTrail" in html
+    assert "prod (123456789012)" in html
+    _assert_style(html)
+
+
+def test_followup_email_flags_high_changes_in_subject_and_stripe():
+    rating = {"rule_id": "IAM-001", "title": "Access key created", "level": "high"}
+    email = email_render.followup_email(sample_events.CONSOLE_MUTATION, "bob", "prod", rating)
+    assert email["subject"].startswith("[HIGH] Same session, additional change")
+    assert f"border-top:4px solid {email_render.COLOR['danger']}" in email["html"]
+
+
+def test_emails_carry_no_images_or_external_resources():
+    emails = [
+        _enriched(),
+        email_render.plain_email(sample_events.CONSOLE_MUTATION, "alice", "prod"),
+        email_render.followup_email(sample_events.CONSOLE_MUTATION, "alice", "prod"),
+        email_render.login_email(sample_events.ROOT_LOGIN, "root", "prod", "root sign-in"),
+        email_render.note_email("Title", "Body"),
+    ]
+    for email in emails:
+        html = email["html"].lower()
+        assert "<img" not in html
+        assert "src=" not in html
+        assert "<link" not in html
+        assert "url(" not in html
+
+
+def test_design_tokens_match_brand_file():
+    import json
+    import pathlib
+
+    tokens_path = pathlib.Path(__file__).resolve().parent.parent / "docs/brand/tokens.json"
+    tokens = json.loads(tokens_path.read_text())
+    assert email_render.COLOR == tokens["color"]
+    assert email_render.FONT == tokens["font"]
+    assert email_render.TAGLINE == tokens["voice"]["tagline"]
 
 
 def test_email_shows_client_and_session_signals():

@@ -89,12 +89,33 @@ def main() -> None:
         client.parse(sample_events.CHROME_UA),
     )
 
-    separator = '<div style="height:32px;"></div>'
-    output.write_text(
-        enriched["html"] + separator + plain["html"] + separator + login["html"]
+    followup_record = {
+        **sample_events.FEDERATED_CONSOLE_MUTATION,
+        "eventName": "DeleteSecurityGroup",
+    }
+    followup_context = client.new_context(followup_record)
+    followup_context["assessment"] = origin.assess(
+        origin.collect(
+            followup_record, followup_context["client"], ip_info, {"signin_gap_seconds": 389}
+        )
     )
+    followup = email_render.followup_email(
+        followup_record, "botocore-session-1792740938 (assumed role admin)",
+        "prod (123456789012)",
+        criticality.classify(followup_record, overrides="", stack_name=""), ip_info,
+        followup_context,
+    )
+    notice = email_render.note_email(
+        "ClickOps Sentinel: AI budget exhausted for today",
+        "The daily Bedrock token budget is spent. Alerts continue on the plain path "
+        "until the next UTC day.",
+    )
+
+    emails = [enriched, plain, followup, login, notice]
+    separator = '<div style="height:32px;"></div>'
+    output.write_text(separator.join(email["html"] for email in emails))
     print(f"Wrote {output}")
-    print(f"Subjects: {enriched['subject']} | {plain['subject']} | {login['subject']}")
+    print("Subjects: " + " | ".join(email["subject"] for email in emails))
 
 
 if __name__ == "__main__":

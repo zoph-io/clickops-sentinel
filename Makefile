@@ -9,7 +9,7 @@ PYTHON ?= python3
 VENV := .venv
 DAYS ?= 30
 
-.PHONY: help install build test lint validate deploy deploy-guided delete stats preview-email catalog-doc clean
+.PHONY: help install build test lint validate deploy deploy-guided delete stats preview-email catalog-doc brand screenshots clean
 
 help:
 	@echo "ClickOps Sentinel"
@@ -24,6 +24,8 @@ help:
 	@echo "  make stats           Print investigation statistics (DAYS=30)"
 	@echo "  make preview-email   Render the email templates to docs/email-preview.html"
 	@echo "  make catalog-doc     Regenerate docs/criticality-catalog.md from the catalog"
+	@echo "  make brand           Regenerate the logo and mascot assets in docs/brand"
+	@echo "  make screenshots     Regenerate the README email screenshots (needs Chrome)"
 	@echo "  make delete          Delete the stack"
 	@echo ""
 	@echo "  Variables: STACK_NAME=$(STACK_NAME) REGION=$(REGION)"
@@ -61,6 +63,12 @@ preview-email:
 
 catalog-doc:
 	$(PYTHON) scripts/render_catalog.py
+
+brand:
+	$(PYTHON) scripts/render_brand.py
+
+screenshots:
+	$(PYTHON) scripts/render_screenshots.py
 
 delete:
 	sam delete --stack-name $(STACK_NAME) --region $(REGION)

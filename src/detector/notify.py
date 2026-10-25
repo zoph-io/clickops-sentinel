@@ -187,20 +187,21 @@ def build_followup_note(
     event_id = record.get("eventID", "")
     link = cloudtrail_console_link(region, event_id)
     level = criticality.level_of(rating)
-    title = f"Same session, additional change: {event_name}"
-    if level:
-        title += f" ({level.upper()})"
-    rating_line = f"\nCriticality: {criticality.describe(rating)}" if rating else ""
-    signals = client_mod.signal_lines(context)
-    if signals:
-        rating_line += f"\nClient signals: {'; '.join(signals)}"
-    markdown = (
-        f"{who} also performed {event_source}:{event_name} "
-        f"in the session investigated above. <{link}|View event>{rating_line}"
+    title = f"{criticality.title_prefix(level)}Same session, additional change: {event_name}"
+    lead = f"{who} made another change in the session investigated above."
+    fields = [("Action", f"{event_source}:{event_name}")]
+    if rating:
+        fields.append(("Criticality", criticality.describe(rating)))
+    if record.get("errorCode"):
+        fields.append(("Result", f"failed ({record['errorCode']})"))
+    fields += _client_fields(context)
+    markdown = "\n".join(
+        [lead]
+        + [f"*{label}*: {value}" for label, value in fields]
+        + [f"<{link}|View event in CloudTrail>"]
     )
-    plain_text = (
-        f"{title}\n{who} also performed {event_source}:{event_name}"
-        f"{rating_line}\nEvent: {link}"
+    plain_text = "\n".join(
+        [title, lead] + [f"{label}: {value}" for label, value in fields] + [f"Event: {link}"]
     )
     return {"title": title, "markdown": markdown, "text": plain_text}
 
