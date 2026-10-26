@@ -1,8 +1,17 @@
-# ClickOps Sentinel
+<p align="center">
+  <img src="docs/brand/logo-mark.svg" width="128"
+       alt="Scout, the ClickOps Sentinel meerkat, standing watch and spotting a click">
+</p>
 
-[![CI](https://github.com/zoph-io/clickops-sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/zoph-io/clickops-sentinel/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/)
+<h1 align="center">ClickOps Sentinel</h1>
+
+<p align="center"><b>Every click, watched.</b></p>
+
+<p align="center">
+  <a href="https://github.com/zoph-io/clickops-sentinel/actions/workflows/ci.yml"><img src="https://github.com/zoph-io/clickops-sentinel/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="License: Apache-2.0"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13-blue.svg" alt="Python 3.13"></a>
+</p>
 
 **Know within seconds when someone changes your AWS account by hand, and
 why it matters.**
@@ -64,8 +73,8 @@ drive a browser in the console or call the API.
 ## See it in action
 
 The screenshots below are mock alerts rendered from the project's real email
-and chat templates with sample data (`make preview-email` renders the email
-templates locally).
+and chat templates with sample data. `make screenshots` regenerates them, and
+`make preview-email` renders every email type locally.
 
 **Not every alert is bad news.** The agent tells routine, sanctioned work
 apart from real problems, and flags the money in both directions:
@@ -92,6 +101,15 @@ the first alert, so one session doesn't flood the channel:
 <p align="center">
   <img src="docs/screenshots/slack.png" width="680"
        alt="Slack message from Amazon Q Developer with the investigation, and a threaded follow-up for CreateAccessKey">
+</p>
+
+**Follow-ups by email.** Within the session cooldown, each further change gets
+a short follow-up instead of a second investigation, with the same who,
+criticality, and driven-by details as the first alert:
+
+<p align="center">
+  <img src="docs/screenshots/email-followup.png" width="560"
+       alt="Follow-up email: same session, additional change DeleteSecurityGroup, with client, driven-by evidence, and criticality">
 </p>
 
 **Console sign-in alerts** for root sign-ins, sign-ins without MFA, and
@@ -525,6 +543,12 @@ Preview the templates locally without any AWS access:
 make preview-email   # writes docs/email-preview.html
 ```
 
+Every email type (investigated change, plain change, same-session follow-up,
+sign-in alert, operational notice) shares one layout and one set of design
+tokens. Emails carry no images or external resources, so they render the
+same with images blocked and never track opens. See the
+[brand and design system](docs/brand/README.md) for the anatomy and colors.
+
 ## Slack and Microsoft Teams setup
 
 Chat delivery uses Amazon Q Developer in chat applications (formerly AWS
@@ -736,7 +760,12 @@ make test           # pytest, no AWS credentials required
 make validate       # sam validate --lint
 make preview-email  # render the email templates to docs/email-preview.html
 make catalog-doc    # regenerate docs/criticality-catalog.md after catalog edits
+make brand          # regenerate the logo and mascot in docs/brand
+make screenshots    # regenerate the README screenshots (needs Chrome and ImageMagick)
 ```
+
+The logo, mascot, colors, voice, and email anatomy are documented in the
+[brand and design system](docs/brand/README.md).
 
 CI runs lint, tests, template validation, and a pip-audit dependency scan,
 all credential-free. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines,

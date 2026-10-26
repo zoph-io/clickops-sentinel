@@ -5,6 +5,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Brand and design system in `docs/brand/`: Scout the meerkat sentinel as
+  mascot, logo mark, small icon, horizontal lockups, social card, color and
+  font tokens (`tokens.json`), voice and writing rules, and the email
+  anatomy. `make brand` regenerates the artwork from one definition and
+  `make screenshots` regenerates the README screenshots from the real
+  templates, including a Slack mock built with the real chat builders.
+
+### Changed
+
+- The same-session follow-up email is now a full alert card instead of a
+  plain paragraph with a raw link: who, source network, client, driven-by
+  evidence, action, criticality, and result tiles, the catalog match, why no
+  new investigation was started, and a CloudTrail button. The chat
+  follow-up uses the same fields, and both carry the `[HIGH]` or
+  `[CRITICAL]` title prefix instead of a level suffix.
+- Every email follows one design system: a status stripe colored by
+  severity, the text wordmark with the amber signal dot, shared fact tiles,
+  section labels, and callouts, and colors from `docs/brand/tokens.json`
+  (a test keeps the renderer in sync). Operational notices, such as the AI
+  budget notice, use the same layout.
+
 ## [0.3.0] - 2026-10-25
 
 ### Added
